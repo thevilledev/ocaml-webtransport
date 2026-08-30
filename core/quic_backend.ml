@@ -14,7 +14,11 @@
    - Stream ids and error codes are OCaml [int]s: both are QUIC varints,
      whose domain [0, 2^62-1] is exactly [0, max_int] on 64-bit platforms.
    - Calls never block and never run effects; drivers translate [`Would_block]
-     into fiber/promise waits. *)
+     into fiber/promise waits.
+   - Certificates and keys may be given as PEM file paths or as in-memory
+     PEM strings ([?cert_chain_pem]/[?priv_key_pem]); giving both forms for
+     the same item is an error. Backends that can only load from disk
+     (quiche) bridge the in-memory form through a temp file internally. *)
 
 module type S = sig
   type t
@@ -32,6 +36,8 @@ module type S = sig
     alpn:string list ->
     ?cert_chain_pem_file:string ->
     ?priv_key_pem_file:string ->
+    ?cert_chain_pem:string ->
+    ?priv_key_pem:string ->
     ?verify:[ `Ca_file of string | `None ] ->
     ?enable_datagrams:bool ->
     ?initial_max_data:int ->

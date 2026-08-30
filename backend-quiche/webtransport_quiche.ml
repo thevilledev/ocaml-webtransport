@@ -45,24 +45,41 @@ module Impl = struct
 
   let poke t = t.dirty <- true
 
-  let config ~role ~alpn ?cert_chain_pem_file ?priv_key_pem_file ?verify
-      ?(enable_datagrams = false) ?(initial_max_data = 10_000_000)
-      ?(initial_max_stream_data = 1_000_000) ?(initial_max_streams_bidi = 100)
-      ?(initial_max_streams_uni = 100) ?(max_idle_ns = 30_000_000_000L)
-      ?(max_udp_payload = 1350) () =
+  (* quiche only loads PEM material from disk; in-memory PEMs are bridged
+     through a temp file that is deleted immediately after the eager load. *)
+  let with_pem_source ~file ~inline ~what load =
+    match (file, inline) with
+    | Some _, Some _ ->
+        Error (Printf.sprintf "config: %s given both as file and in-memory" what)
+    | Some f, None -> load f
+    | None, Some pem ->
+        let path, oc = Filename.open_temp_file "wt-quiche" ".pem" in
+        Fun.protect
+          ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+          (fun () ->
+            output_string oc pem;
+            close_out oc;
+            load path)
+    | None, None -> Ok ()
+
+  let config ~role ~alpn ?cert_chain_pem_file ?priv_key_pem_file
+      ?cert_chain_pem ?priv_key_pem ?verify ?(enable_datagrams = false)
+      ?(initial_max_data = 10_000_000) ?(initial_max_stream_data = 1_000_000)
+      ?(initial_max_streams_bidi = 100) ?(initial_max_streams_uni = 100)
+      ?(max_idle_ns = 30_000_000_000L) ?(max_udp_payload = 1350) () =
     let ( let* ) = Result.bind in
     let qerr r = Result.map_error Q.err_to_string r in
     let qc = Q.Config.create () in
     let* () = qerr (Q.Config.set_application_protos qc alpn) in
     let* () =
-      match cert_chain_pem_file with
-      | None -> Ok ()
-      | Some f -> qerr (Q.Config.load_cert_chain qc ~pem_file:f)
+      with_pem_source ~file:cert_chain_pem_file ~inline:cert_chain_pem
+        ~what:"certificate chain" (fun f ->
+          qerr (Q.Config.load_cert_chain qc ~pem_file:f))
     in
     let* () =
-      match priv_key_pem_file with
-      | None -> Ok ()
-      | Some f -> qerr (Q.Config.load_priv_key qc ~pem_file:f)
+      with_pem_source ~file:priv_key_pem_file ~inline:priv_key_pem
+        ~what:"private key" (fun f ->
+          qerr (Q.Config.load_priv_key qc ~pem_file:f))
     in
     let* () =
       match verify with

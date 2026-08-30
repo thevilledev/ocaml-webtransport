@@ -48,6 +48,7 @@ module Impl = struct
   type config = [ `Client | `Server ]
 
   let config ~role ~alpn:_ ?cert_chain_pem_file:_ ?priv_key_pem_file:_
+      ?cert_chain_pem:_ ?priv_key_pem:_
       ?verify:_ ?enable_datagrams:_ ?initial_max_data:_
       ?initial_max_stream_data:_ ?initial_max_streams_bidi:_
       ?initial_max_streams_uni:_ ?max_idle_ns:_ ?max_udp_payload:_ () =

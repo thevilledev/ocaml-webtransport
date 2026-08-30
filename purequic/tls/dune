@@ -1,0 +1,5 @@
+(library
+ (name purequic_tls)
+ (public_name purequic.tls)
+ (libraries digestif kdf.hkdf mirage-crypto mirage-crypto-ec x509 domain-name
+   eqaf))

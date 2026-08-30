@@ -1,4 +1,5 @@
-(test
- (name test_initial_from_quiche)
+(tests
+ (names test_initial_from_quiche test_tls_vs_quiche)
  (package webtransport-quiche)
- (libraries quiche purequic wt_certs bigstringaf alcotest))
+ (libraries quiche purequic purequic_tls wt_certs x509 mirage-crypto-rng
+   bigstringaf alcotest))

@@ -18,6 +18,8 @@ module Impl = struct
     alpn : string list;
     cert_chain_pem_file : string option;
     priv_key_pem_file : string option;
+    cert_chain_pem : string option;
+    priv_key_pem : string option;
     verify : [ `Ca_file of string | `None ] option;
     enable_datagrams : bool;
     initial_max_data : int;
@@ -32,17 +34,19 @@ module Impl = struct
   type addr = string * int
   type dir = [ `Uni | `Bidi ]
 
-  let config ~role ~alpn ?cert_chain_pem_file ?priv_key_pem_file ?verify
-      ?(enable_datagrams = false) ?(initial_max_data = 10_000_000)
-      ?(initial_max_stream_data = 1_000_000) ?(initial_max_streams_bidi = 100)
-      ?(initial_max_streams_uni = 100) ?(max_idle_ns = 30_000_000_000L)
-      ?(max_udp_payload = 1350) () =
+  let config ~role ~alpn ?cert_chain_pem_file ?priv_key_pem_file
+      ?cert_chain_pem ?priv_key_pem ?verify ?(enable_datagrams = false)
+      ?(initial_max_data = 10_000_000) ?(initial_max_stream_data = 1_000_000)
+      ?(initial_max_streams_bidi = 100) ?(initial_max_streams_uni = 100)
+      ?(max_idle_ns = 30_000_000_000L) ?(max_udp_payload = 1350) () =
     Ok
       {
         role;
         alpn;
         cert_chain_pem_file;
         priv_key_pem_file;
+        cert_chain_pem;
+        priv_key_pem;
         verify;
         enable_datagrams;
         initial_max_data;
