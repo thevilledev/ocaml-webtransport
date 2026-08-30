@@ -311,6 +311,10 @@ module Raw = struct
         st : Core_conn.t;
         accept_q : int Eio.Stream.t;
         dgram_q : string Eio.Stream.t;
+        (* Streams whose last [stream_recv] returned data together with the
+           fin bit: the next [read] must report [`Fin] without touching the
+           backend (which may have collected the stream by then). *)
+        fin_pending : (int, unit) Hashtbl.t;
       }
         -> conn
 
@@ -359,7 +363,9 @@ module Raw = struct
     let accept_q = Eio.Stream.create max_int in
     let dgram_q = Eio.Stream.create 1024 in
     install_drain (module B) h st ~accept_q ~dgram_q;
-    Conn { b = (module B); h; st; accept_q; dgram_q }
+    Conn
+      { b = (module B); h; st; accept_q; dgram_q;
+        fin_pending = Hashtbl.create 8 }
 
   (* ---- user operations ---- *)
 
@@ -382,15 +388,25 @@ module Raw = struct
         | Error `Would_block -> None
         | Error _ -> invalid_arg "open_stream")
 
-  let read (Conn { b = (module B); h; st; _ }) ~id buf ~off ~len =
+  let read (Conn { b = (module B); h; st; fin_pending; _ }) ~id buf ~off ~len =
     Core_conn.locked_op st (fun () ->
-        match B.stream_recv h ~id buf ~off ~len with
-        | Ok (n, fin) -> if n = 0 && fin then Some `Fin else Some (`Data n)
-        | Error `Would_block -> None
-        | Error `Fin -> Some `Fin
-        | Error (`Reset code) -> raise (Stream_reset_by_peer code)
-        | Error (`Stopped code) -> raise (Stream_stopped_by_peer code)
-        | Error `Invalid -> invalid_arg "read: invalid stream")
+        if Hashtbl.mem fin_pending id then begin
+          Hashtbl.remove fin_pending id;
+          Some `Fin
+        end
+        else
+          match B.stream_recv h ~id buf ~off ~len with
+          | Ok (n, fin) ->
+              if n = 0 && fin then Some `Fin
+              else begin
+                if fin then Hashtbl.replace fin_pending id ();
+                Some (`Data n)
+              end
+          | Error `Would_block -> None
+          | Error `Fin -> Some `Fin
+          | Error (`Reset code) -> raise (Stream_reset_by_peer code)
+          | Error (`Stopped code) -> raise (Stream_stopped_by_peer code)
+          | Error `Invalid -> invalid_arg "read: invalid stream")
 
   let write (Conn { b = (module B); h; st; _ }) ~id data =
     let len = String.length data in
