@@ -80,6 +80,18 @@ const post = async obj => { try { await fetch('/result', {method:'POST', headers
     if (uniEchoed !== 'uni-ping') throw new Error('bad uni echo: ' + uniEchoed);
     steps.push('uni-echo');
     log('uni stream echoed');
+    // Server-initiated close on a second session.
+    const wt2 = new WebTransport(info.url.replace('/echo', '/close-me'),
+      { serverCertificateHashes: [{ algorithm: 'sha-256', value: bytes }] });
+    await wt2.ready;
+    const closeInfo = await Promise.race([
+      wt2.closed,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('server close timeout')), 5000)),
+    ]);
+    if (closeInfo.closeCode !== 7 || closeInfo.reason !== 'server-close')
+      throw new Error('bad server close: ' + JSON.stringify(closeInfo));
+    steps.push('server-close');
+    log('server-initiated close observed');
     await wt.close({ closeCode: 42, reason: 'done' });
     steps.push('closed');
     await post({ pass: true, steps });
@@ -153,6 +165,11 @@ let () =
       let close_seen = ref None in
       let handler session =
         incr established;
+        if Wt.Session.path session = "/close-me" then begin
+          Eio.Time.Mono.sleep mono 0.1;
+          Wt.Session.close ~code:7 ~message:"server-close" session
+        end
+        else
         Switch.run @@ fun hsw ->
         Fiber.fork ~sw:hsw (fun () ->
             try

@@ -20,7 +20,9 @@ depends: [
   "mirage-crypto-rng"
   "ptime"
   "digestif"
+  "cmdliner"
   "alcotest" {with-test}
+  "crowbar" {with-test}
   "odoc" {with-doc}
 ]
 build: [

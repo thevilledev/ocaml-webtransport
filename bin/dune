@@ -1,0 +1,5 @@
+(executable
+ (name wt_devcert)
+ (public_name wt-devcert)
+ (package webtransport)
+ (libraries wt_certs cmdliner))

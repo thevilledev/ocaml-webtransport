@@ -52,6 +52,25 @@ type session = {
   mutable req : request option;
   mutable draft02 : bool;  (* request carried sec-webtransport-http3-draft02 *)
   mutable data_streams : int list;  (* attached WT streams *)
+  (* Session-level flow control (draft-12+). Active only when both sides
+     advertised non-zero limits; browsers never do, so it stays off for
+     them. Stream signal prefixes are excluded from the data accounting. *)
+  mutable fc_on : bool;
+  mutable send_max_data : int;  (* peer-granted absolute limit *)
+  mutable sent_data : int;
+  mutable send_max_bidi : int;
+  mutable send_max_uni : int;
+  mutable opened_bidi : int;
+  mutable opened_uni : int;
+  mutable recv_window : int;  (* our configured data window *)
+  mutable recv_max_data : int;  (* absolute limit we granted *)
+  mutable consumed_data : int;
+  mutable recv_bidi_window : int;
+  mutable recv_max_bidi : int;
+  mutable accepted_bidi : int;
+  mutable recv_uni_window : int;
+  mutable recv_max_uni : int;
+  mutable accepted_uni : int;
 }
 
 type frames_ctx = {
@@ -69,7 +88,9 @@ type rstate =
   | Control_start
   | Frames of frames_ctx
   | Drain
-  | Parked  (* WT stream for an unknown session: left unread (M3: timeout) *)
+  | Parked of { claimed_sid : int; dir : dir; since : int64 }
+    (* WT stream whose session isn't established: left unread so QUIC flow
+       control holds the peer; bounded, expired, attached on establishment *)
   | Attached of int  (* WT data stream attached to session [sid] *)
   | Dead
 
@@ -85,6 +106,7 @@ type wstream = {
   wout : Bytebuf.t;
   mutable wfin : bool;  (* fin requested after wout drains *)
   mutable wfin_sent : bool;
+  mutable wsid : int option;  (* owning WT session, for data accounting *)
 }
 
 type role = [ `Client | `Server ]
@@ -93,11 +115,16 @@ type t = {
   bc : backend_conn;
   role : role;
   wt_max_sessions : int;
-  fc : int * int * int;  (* advertised WT flow-control settings; 0 = off *)
+  fc : int * int * int;  (* advertised WT flow control (data, uni, bidi); 0 = off *)
+  parked_cap : int;
+  parked_timeout_ns : int64;
   notif : notification Queue.t;
   rstreams : (int, rstream) Hashtbl.t;
   wstreams : (int, wstream) Hashtbl.t;
   sessions : (int, session) Hashtbl.t;
+  closed_ring : int array;  (* recently closed session ids, -1 = empty *)
+  mutable closed_ring_pos : int;
+  mutable parked_count : int;
   scratch : Bigstringaf.t;
   mutable started : bool;  (* control stream opened, SETTINGS sent *)
   mutable peer_settings : Settings.t option;
@@ -106,18 +133,25 @@ type t = {
   mutable pending_connect :
     (string * string * string option * (string * string) list) option;
   mutable conn_dead : bool;
+  mutable now : int64;  (* last timestamp given to [process] *)
 }
 
-let create ?(wt_max_sessions = 1024) ?(fc = (0, 0, 0)) ~role bc =
+let create ?(wt_max_sessions = 1024) ?(fc = (0, 0, 0)) ?(parked_cap = 64)
+    ?(parked_timeout_ns = 5_000_000_000L) ~role bc =
   {
     bc;
     role;
     wt_max_sessions;
     fc;
+    parked_cap;
+    parked_timeout_ns;
     notif = Queue.create ();
     rstreams = Hashtbl.create 16;
     wstreams = Hashtbl.create 16;
     sessions = Hashtbl.create 4;
+    closed_ring = Array.make 16 (-1);
+    closed_ring_pos = 0;
+    parked_count = 0;
     scratch = Bigstringaf.create 65_536;
     started = false;
     peer_settings = None;
@@ -125,6 +159,7 @@ let create ?(wt_max_sessions = 1024) ?(fc = (0, 0, 0)) ~role bc =
     control_in = None;
     pending_connect = None;
     conn_dead = false;
+    now = 0L;
   }
 
 let notify t n = Queue.add n t.notif
@@ -140,35 +175,70 @@ let wstream t id =
   match Hashtbl.find_opt t.wstreams id with
   | Some w -> w
   | None ->
+      let wsid =
+        match Hashtbl.find_opt t.rstreams id with
+        | Some { rstate = Attached sid; _ } -> Some sid
+        | _ -> None
+      in
       let w =
-        { wid = id; wout = Bytebuf.create (); wfin = false; wfin_sent = false }
+        {
+          wid = id;
+          wout = Bytebuf.create ();
+          wfin = false;
+          wfin_sent = false;
+          wsid;
+        }
       in
       Hashtbl.add t.wstreams id w;
       w
 
 let try_flush_wstream t w =
   let (C ((module B), h)) = t.bc in
+  let fc_session () =
+    match w.wsid with
+    | None -> None
+    | Some sid -> (
+        match Hashtbl.find_opt t.sessions sid with
+        | Some s when s.fc_on -> Some s
+        | _ -> None)
+  in
   let rec go () =
     let n = Bytebuf.length w.wout in
     if n > 0 then begin
-      let chunk = min n (Bigstringaf.length t.scratch) in
-      let data, pos = Bytebuf.view w.wout in
-      Bigstringaf.blit_from_string data ~src_off:pos t.scratch ~dst_off:0
-        ~len:chunk;
-      let fin = w.wfin && chunk = n in
-      match B.stream_send h ~id:w.wid t.scratch ~off:0 ~len:chunk ~fin with
-      | Ok written ->
-          Bytebuf.advance w.wout written;
-          if written = chunk && fin then w.wfin_sent <- true;
-          if written > 0 then go ()
-      | Error `Would_block -> ()
-      | Error _ -> w.wfin_sent <- true (* stream gone; drop buffered bytes *)
+      let allowance =
+        match fc_session () with
+        | Some s -> max 0 (s.send_max_data - s.sent_data)
+        | None -> max_int
+      in
+      let chunk = min (min n (Bigstringaf.length t.scratch)) allowance in
+      if chunk > 0 then begin
+        let data, pos = Bytebuf.view w.wout in
+        Bigstringaf.blit_from_string data ~src_off:pos t.scratch ~dst_off:0
+          ~len:chunk;
+        let fin = w.wfin && chunk = n in
+        match B.stream_send h ~id:w.wid t.scratch ~off:0 ~len:chunk ~fin with
+        | Ok written ->
+            Bytebuf.advance w.wout written;
+            (match fc_session () with
+            | Some s -> s.sent_data <- s.sent_data + written
+            | None -> ());
+            if written = chunk && fin then w.wfin_sent <- true;
+            if written > 0 then go ()
+        | Error `Would_block -> ()
+        | Error _ -> w.wfin_sent <- true (* stream gone; drop buffered bytes *)
+      end
     end
     else if w.wfin && not w.wfin_sent then
       match B.stream_finish h ~id:w.wid with
       | Ok () | Error _ -> w.wfin_sent <- true
   in
   go ()
+
+(* Retry buffered writers of a session after its send window grew. *)
+let flush_session_wstreams t sid =
+  Hashtbl.iter
+    (fun _ w -> if w.wsid = Some sid then try_flush_wstream t w)
+    t.wstreams
 
 let write t ~id ?(fin = false) s =
   let w = wstream t id in
@@ -220,14 +290,63 @@ let mk_session t sid state =
       req = None;
       draft02 = false;
       data_streams = [];
+      fc_on = false;
+      send_max_data = 0;
+      sent_data = 0;
+      send_max_bidi = 0;
+      send_max_uni = 0;
+      opened_bidi = 0;
+      opened_uni = 0;
+      recv_window = 0;
+      recv_max_data = 0;
+      consumed_data = 0;
+      recv_bidi_window = 0;
+      recv_max_bidi = 0;
+      accepted_bidi = 0;
+      recv_uni_window = 0;
+      recv_max_uni = 0;
+      accepted_uni = 0;
     }
   in
   Hashtbl.add t.sessions sid s;
   s
 
+let fc_configured t =
+  let d, u, b = t.fc in
+  d > 0 || u > 0 || b > 0
+
+let peer_fc_advertised t =
+  match t.peer_settings with
+  | Some ps ->
+      ps.Settings.wt_initial_max_data > 0
+      || ps.Settings.wt_initial_max_streams_uni > 0
+      || ps.Settings.wt_initial_max_streams_bidi > 0
+  | None -> false
+
+(* Activate session flow control iff both sides advertised limits. *)
+let setup_fc t s =
+  if fc_configured t && peer_fc_advertised t then begin
+    let d, u, b = t.fc in
+    let ps = Option.get t.peer_settings in
+    s.fc_on <- true;
+    s.send_max_data <- ps.Settings.wt_initial_max_data;
+    s.send_max_uni <- ps.Settings.wt_initial_max_streams_uni;
+    s.send_max_bidi <- ps.Settings.wt_initial_max_streams_bidi;
+    s.recv_window <- d;
+    s.recv_max_data <- d;
+    s.recv_uni_window <- u;
+    s.recv_max_uni <- u;
+    s.recv_bidi_window <- b;
+    s.recv_max_bidi <- b
+  end
+
+let recently_closed t sid = Array.exists (fun x -> x = sid) t.closed_ring
+
 let end_session t s ~notification =
   if s.sstate <> `Closed then begin
     s.sstate <- `Closed;
+    t.closed_ring.(t.closed_ring_pos) <- s.sid;
+    t.closed_ring_pos <- (t.closed_ring_pos + 1) mod Array.length t.closed_ring;
     (match notification with Some n -> notify t n | None -> ());
     (* Tear down associated WT data streams. *)
     List.iter
@@ -251,7 +370,75 @@ let handle_capsule t s (ty, payload) =
                   { sid = s.sid; code = 0; message = ""; abrupt = true }))
   else if ty = Wire.Capsule_type.wt_drain_session then
     notify t (Session_peer_drain { sid = s.sid })
-  else () (* unknown and flow-control capsules: ignored for now *)
+  else if ty = Wire.Capsule_type.wt_max_data then (
+    match Capsule.decode_varint_capsule payload with
+    | Ok v when v > s.send_max_data ->
+        s.send_max_data <- v;
+        flush_session_wstreams t s.sid
+    | _ -> ())
+  else if ty = Wire.Capsule_type.wt_max_streams_bidi then (
+    match Capsule.decode_varint_capsule payload with
+    | Ok v when v > s.send_max_bidi -> s.send_max_bidi <- v
+    | _ -> ())
+  else if ty = Wire.Capsule_type.wt_max_streams_uni then (
+    match Capsule.decode_varint_capsule payload with
+    | Ok v when v > s.send_max_uni -> s.send_max_uni <- v
+    | _ -> ())
+  else () (* unknown capsule types are ignored *)
+
+(* Attach a WT data stream to its session, updating stream-count flow
+   control and granting more credit when half the window is consumed. *)
+let attach_stream t s (r : rstream) dir =
+  s.data_streams <- r.rid :: s.data_streams;
+  r.rstate <- Attached s.sid;
+  (match Hashtbl.find_opt t.wstreams r.rid with
+  | Some w -> w.wsid <- Some s.sid
+  | None -> ());
+  if s.fc_on then begin
+    match dir with
+    | `Bidi ->
+        s.accepted_bidi <- s.accepted_bidi + 1;
+        if s.recv_max_bidi - s.accepted_bidi < s.recv_bidi_window / 2 then begin
+          s.recv_max_bidi <- s.accepted_bidi + s.recv_bidi_window;
+          send_capsule t ~id:s.sid
+            (Capsule.encode_max_streams ~dir:`Bidi s.recv_max_bidi)
+        end
+    | `Uni ->
+        s.accepted_uni <- s.accepted_uni + 1;
+        if s.recv_max_uni - s.accepted_uni < s.recv_uni_window / 2 then begin
+          s.recv_max_uni <- s.accepted_uni + s.recv_uni_window;
+          send_capsule t ~id:s.sid
+            (Capsule.encode_max_streams ~dir:`Uni s.recv_max_uni)
+        end
+  end;
+  notify t (Wt_stream_opened { sid = s.sid; stream_id = r.rid; dir });
+  if Bytebuf.length r.rbuf > 0 || r.rfin then
+    notify t (Wt_stream_readable { stream_id = r.rid })
+
+(* Attach any parked streams claiming this (now established) session. *)
+let attach_parked t s =
+  Hashtbl.iter
+    (fun _ r ->
+      match r.rstate with
+      | Parked { claimed_sid; dir; _ } when claimed_sid = s.sid ->
+          t.parked_count <- t.parked_count - 1;
+          attach_stream t s r dir
+      | _ -> ())
+    t.rstreams
+
+let expire_parked t =
+  if Int64.compare t.now 0L > 0 then
+    Hashtbl.iter
+      (fun _ r ->
+        match r.rstate with
+        | Parked { since; _ }
+          when Int64.compare (Int64.sub t.now since) t.parked_timeout_ns > 0 ->
+            t.parked_count <- t.parked_count - 1;
+            reset_stream t ~id:r.rid
+              ~h3_code:Wt_error.wt_buffered_stream_rejected;
+            r.rstate <- Dead
+        | _ -> ())
+      t.rstreams
 
 let drain_session_capsules t s =
   let rec go () =
@@ -290,6 +477,17 @@ let handle_request t (r : rstream) fields =
     when protocol = Wire.protocol_token
          || protocol = Wire.protocol_token_legacy -> (
       match (get ":authority", get ":path") with
+      | Some authority, Some path
+        when (not (fc_configured t && peer_fc_advertised t))
+             && Hashtbl.fold
+                  (fun _ s acc ->
+                    acc || s.sstate = `Open || s.sstate = `Requested)
+                  t.sessions false ->
+          (* Without negotiated session flow control, only one concurrent
+             session per connection (draft-16 section 5.6.1 semantics). *)
+          ignore (authority, path);
+          reset_stream t ~id:r.rid ~h3_code:Wt_error.h3_request_rejected;
+          r.rstate <- Dead
       | Some authority, Some path ->
           let s = mk_session t r.rid `Requested in
           let origin = List.assoc_opt "origin" regular in
@@ -315,8 +513,10 @@ let handle_response t (r : rstream) fields =
       | Some st
         when String.length st > 0 && st.[0] = '2' ->
           s.sstate <- `Open;
+          setup_fc t s;
           debug (lazy (Printf.sprintf "session %d established" r.rid));
-          notify t (Session_established { sid = r.rid })
+          notify t (Session_established { sid = r.rid });
+          attach_parked t s
       | Some st ->
           let status = try int_of_string st with _ -> 0 in
           s.sstate <- `Closed;
@@ -330,7 +530,7 @@ let handle_response t (r : rstream) fields =
 
 let rec parse_stream t (r : rstream) =
   match r.rstate with
-  | Dead | Parked -> ()
+  | Dead | Parked _ -> ()
   | Attached _ -> ()
   | Drain ->
       ignore (Bytebuf.take_all r.rbuf)
@@ -386,18 +586,27 @@ let rec parse_stream t (r : rstream) =
   | Wt_session_id dir -> (
       match Bytebuf.get_varint r.rbuf with
       | None -> ()
-      | Some sid -> (
-          match session t sid with
-          | Some s when s.sstate = `Open ->
-              s.data_streams <- r.rid :: s.data_streams;
-              r.rstate <- Attached sid;
-              notify t (Wt_stream_opened { sid; stream_id = r.rid; dir });
-              if Bytebuf.length r.rbuf > 0 || r.rfin then
-                notify t (Wt_stream_readable { stream_id = r.rid })
-          | Some _ | None ->
-              (* Unknown or not-yet-established session: park unread.
-                 (M3: bounded buffer + timeout + closed-session ring.) *)
-              r.rstate <- Parked))
+      | Some sid ->
+          if recently_closed t sid then begin
+            reset_stream t ~id:r.rid
+              ~h3_code:Wt_error.wt_buffered_stream_rejected;
+            r.rstate <- Dead
+          end
+          else (
+            match session t sid with
+            | Some s when s.sstate = `Open -> attach_stream t s r dir
+            | Some _ | None ->
+                (* Session not (yet) established: park unread — QUIC flow
+                   control bounds the peer; a cap and timeout bound us. *)
+                if t.parked_count >= t.parked_cap then begin
+                  reset_stream t ~id:r.rid
+                    ~h3_code:Wt_error.wt_buffered_stream_rejected;
+                  r.rstate <- Dead
+                end
+                else begin
+                  t.parked_count <- t.parked_count + 1;
+                  r.rstate <- Parked { claimed_sid = sid; dir; since = t.now }
+                end))
   | Control_start -> (
       let data, pos = Bytebuf.view r.rbuf in
       match Varint.get_string data ~pos with
@@ -646,7 +855,7 @@ let on_readable t id =
   | None -> ()
   | Some r -> (
       match r.rstate with
-      | Parked -> () (* park-don't-read: QUIC flow control holds the peer *)
+      | Parked _ -> () (* park-don't-read: QUIC flow control holds the peer *)
       | Attached _ -> notify t (Wt_stream_readable { stream_id = id })
       | Dead -> ()
       | _ ->
@@ -675,7 +884,9 @@ let drain_datagrams t =
   in
   go ()
 
-let process t =
+let process t ~now =
+  t.now <- now;
+  expire_parked t;
   let (C ((module B), h)) = t.bc in
   let rec drain_events () =
     match B.next_event h with
@@ -735,12 +946,14 @@ let accept_session t ~sid =
   match session t sid with
   | Some s when s.sstate = `Requested ->
       s.sstate <- `Open;
+      setup_fc t s;
       let extra =
         if s.draft02 then [ ("sec-webtransport-http3-draft", "draft02") ]
         else []
       in
       send_headers t ~id:sid ((":status", "200") :: extra);
-      notify t (Session_established { sid })
+      notify t (Session_established { sid });
+      attach_parked t s
   | _ -> invalid_arg "accept_session: not a pending session"
 
 let reject_session t ~sid ~status =
@@ -777,31 +990,47 @@ let drain_session t ~sid =
 let open_wt_stream t ~sid ~dir =
   match session t sid with
   | Some s when s.sstate = `Open -> (
-      let (C ((module B), h)) = t.bc in
-      match B.open_stream h ~dir with
-      | Ok id ->
-          s.data_streams <- id :: s.data_streams;
-          (match dir with
-          | `Bidi ->
-              (* Track for reads: the peer answers on the same stream. *)
-              Hashtbl.replace t.rstreams id
-                {
-                  rid = id;
-                  rbuf = Bytebuf.create ();
-                  rstate = Attached sid;
-                  rfin = false;
-                }
-          | `Uni -> ());
-          let b = Buffer.create 8 in
-          Varint.add_buffer b
+      let credit_ok =
+        (not s.fc_on)
+        ||
+        match dir with
+        | `Bidi -> s.opened_bidi < s.send_max_bidi
+        | `Uni -> s.opened_uni < s.send_max_uni
+      in
+      if not credit_ok then Error `Would_block
+      else
+        let (C ((module B), h)) = t.bc in
+        match B.open_stream h ~dir with
+        | Ok id ->
+            if s.fc_on then (
+              match dir with
+              | `Bidi -> s.opened_bidi <- s.opened_bidi + 1
+              | `Uni -> s.opened_uni <- s.opened_uni + 1);
+            s.data_streams <- id :: s.data_streams;
+            (* Write the signal prefix before the stream is marked as
+               session-owned: prefixes are excluded from data flow control. *)
+            let b = Buffer.create 8 in
+            Varint.add_buffer b
+              (match dir with
+              | `Bidi -> Wire.Frame.wt_stream
+              | `Uni -> Wire.Uni_stream.wt);
+            Varint.add_buffer b sid;
+            write t ~id (Buffer.contents b);
+            (wstream t id).wsid <- Some sid;
             (match dir with
-            | `Bidi -> Wire.Frame.wt_stream
-            | `Uni -> Wire.Uni_stream.wt);
-          Varint.add_buffer b sid;
-          write t ~id (Buffer.contents b);
-          Ok id
-      | Error `Would_block -> Error `Would_block
-      | Error _ -> Error `Invalid)
+            | `Bidi ->
+                (* Track for reads: the peer answers on the same stream. *)
+                Hashtbl.replace t.rstreams id
+                  {
+                    rid = id;
+                    rbuf = Bytebuf.create ();
+                    rstate = Attached sid;
+                    rfin = false;
+                  }
+            | `Uni -> ());
+            Ok id
+        | Error `Would_block -> Error `Would_block
+        | Error _ -> Error `Invalid)
   | _ -> Error `Invalid
 
 (* Application writes on WT streams (buffered against flow control). *)
@@ -853,6 +1082,21 @@ let session_state t ~sid =
 let session_request t ~sid =
   match session t sid with Some s -> s.req | None -> None
 
+(* Session receive-side data accounting; grants more credit at half-window. *)
+let account_read t ~id n =
+  if n > 0 then
+    match Hashtbl.find_opt t.rstreams id with
+    | Some { rstate = Attached sid; _ } -> (
+        match session t sid with
+        | Some s when s.fc_on && s.sstate = `Open ->
+            s.consumed_data <- s.consumed_data + n;
+            if s.recv_max_data - s.consumed_data < s.recv_window / 2 then begin
+              s.recv_max_data <- s.consumed_data + s.recv_window;
+              send_capsule t ~id:sid (Capsule.encode_max_data s.recv_max_data)
+            end
+        | _ -> ())
+    | _ -> ()
+
 (* Reads from an engine-tracked stream, draining any bytes the engine pulled
    before the stream was attached to its session. Drivers use this instead of
    calling the backend directly for WT data streams. *)
@@ -865,6 +1109,7 @@ let read_attached t ~id buf ~off ~len =
         let n = min buffered len in
         let s = Bytebuf.take r.rbuf n in
         Bigstringaf.blit_from_string s ~src_off:0 buf ~dst_off:off ~len:n;
+        account_read t ~id n;
         Ok (n, r.rfin && Bytebuf.length r.rbuf = 0)
       end
       else if r.rfin then Error `Fin
@@ -872,6 +1117,7 @@ let read_attached t ~id buf ~off ~len =
         match B.stream_recv h ~id buf ~off ~len with
         | Ok (n, fin) ->
             if fin then r.rfin <- true;
+            account_read t ~id n;
             Ok (n, fin)
         | e -> e)
   | None -> B.stream_recv h ~id buf ~off ~len

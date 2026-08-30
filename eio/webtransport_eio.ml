@@ -271,8 +271,14 @@ let server_recv_loop (type c k) ~sw ~sock
                       match on_new_conn h scid with
                       | None -> ()
                       | Some st ->
-                          Hashtbl.add table hdr.B.dcid st;
+                          let dcid = hdr.B.dcid in
+                          Hashtbl.add table dcid st;
                           Hashtbl.add table scid st;
+                          Fiber.fork_daemon ~sw (fun () ->
+                              ignore (Promise.await st.Core_conn.closed_p);
+                              Hashtbl.remove table dcid;
+                              Hashtbl.remove table scid;
+                              `Stop_daemon);
                           Core_conn.feed st rbuf ~len:n ~from))));
         loop ()
       in
@@ -501,6 +507,8 @@ module Wt = struct
     eng : Engine.t;
     s_closed_p : (int * string) Promise.t;
     s_closed_r : (int * string) Promise.u;
+    draining_p : unit Promise.t;
+    draining_r : unit Promise.u;
     dgrams : string Eio.Stream.t;
     bidi_q : int Eio.Stream.t;  (* peer-opened WT bidi streams *)
     uni_q : int Eio.Stream.t;  (* peer-opened WT uni streams *)
@@ -531,6 +539,7 @@ module Wt = struct
           }
     in
     let s_closed_p, s_closed_r = Promise.create () in
+    let draining_p, draining_r = Promise.create () in
     {
       sid;
       req;
@@ -538,6 +547,8 @@ module Wt = struct
       eng = ctx.c_eng;
       s_closed_p;
       s_closed_r;
+      draining_p;
+      draining_r;
       dgrams = Eio.Stream.create 1024;
       bidi_q = Eio.Stream.create max_int;
       uni_q = Eio.Stream.create max_int;
@@ -573,7 +584,12 @@ module Wt = struct
             Hashtbl.remove ctx.sessions sid;
             end_session_local s ~code ~message
         | None -> ())
-    | Engine.Session_peer_drain _ -> ()
+    | Engine.Session_peer_drain { sid } -> (
+        match Hashtbl.find_opt ctx.sessions sid with
+        | Some s ->
+            if not (Promise.is_resolved s.draining_p) then
+              Promise.resolve s.draining_r ()
+        | None -> ())
     | Engine.Wt_datagram { sid; payload } -> (
         match Hashtbl.find_opt ctx.sessions sid with
         | Some s ->
@@ -600,8 +616,9 @@ module Wt = struct
         Hashtbl.reset ctx.sessions;
         Core_conn.mark_dead ctx.c_st { code; reason; remote; app = true }
 
-  let mk_ctx (type c) (module B : Qb.S with type t = c) (h : c) st ~accept_cb =
-    let eng = Engine.create ~role:`Server (Engine.C ((module B), h)) in
+  let mk_ctx (type c) (module B : Qb.S with type t = c) (h : c) st ~accept_cb
+      ~fc =
+    let eng = Engine.create ~role:`Server ?fc (Engine.C ((module B), h)) in
     let ctx =
       {
         c_st = st;
@@ -616,7 +633,9 @@ module Wt = struct
 
   let install_wt_drain ctx =
     ctx.c_st.Core_conn.drain <-
-      (fun () -> List.iter (dispatch ctx) (Engine.process ctx.c_eng))
+      (fun () ->
+        List.iter (dispatch ctx)
+          (Engine.process ctx.c_eng ~now:(ctx.c_st.Core_conn.now_ns ())))
 
   (* ---- session API ---- *)
 
@@ -632,6 +651,14 @@ module Wt = struct
       end_session_local s ~code ~message
 
     let closed s = Promise.await s.s_closed_p
+
+    (* Ask the peer to stop opening new streams (WT_DRAIN_SESSION). *)
+    let drain s =
+      Core_conn.command s.st (fun () ->
+          Engine.drain_session s.eng ~sid:s.sid)
+
+    (* Resolves when the peer asks us to drain. *)
+    let draining s = Promise.await s.draining_p
 
     let send_datagram s payload =
       Core_conn.command s.st (fun () ->
@@ -743,7 +770,7 @@ module Wt = struct
   (* ---- endpoints ---- *)
 
   let listen ~sw ~net ~clock ~backend:(Backend ((module B), cfg)) ~port
-      ?(accept = fun _ -> `Accept) ~handler () =
+      ?(accept = fun _ -> `Accept) ?fc ~handler () =
     let sock =
       Eio.Net.datagram_socket ~sw ~reuse_addr:true net
         (`Udp (Eio.Net.Ipaddr.V4.any, port))
@@ -756,7 +783,7 @@ module Wt = struct
          ~on_new_conn:(fun h _key ->
            let st = Core_conn.mk ~sock_send ~now_ns ~sleep_until_ns in
            Core_conn.install_backend (module B) h st ~local;
-           let ctx = mk_ctx (module B) h st ~accept_cb:accept in
+           let ctx = mk_ctx (module B) h st ~accept_cb:accept ~fc in
            install_wt_drain ctx;
            Core_conn.pump ~sw st ~on_dead:(fun () -> ());
            (* Per-connection acceptor: hand established sessions to the
@@ -783,7 +810,7 @@ module Wt = struct
            Some st))
 
   let connect ~sw ~net ~clock ~backend:(Backend ((module B), cfg)) ?origin
-      ?(headers = []) ?server_name ~peer ~authority ~path () =
+      ?(headers = []) ?server_name ?fc ~peer ~authority ~path () =
     let sock =
       Eio.Net.datagram_socket ~sw net (`Udp (Eio.Net.Ipaddr.V4.any, 0))
     in
@@ -796,7 +823,7 @@ module Wt = struct
     | Ok h ->
         let st = Core_conn.mk ~sock_send ~now_ns ~sleep_until_ns in
         Core_conn.install_backend (module B) h st ~local;
-        let eng = Engine.create ~role:`Client (Engine.C ((module B), h)) in
+        let eng = Engine.create ~role:`Client ?fc (Engine.C ((module B), h)) in
         let ctx =
           {
             c_st = st;

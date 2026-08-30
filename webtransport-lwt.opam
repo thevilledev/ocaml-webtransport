@@ -13,6 +13,7 @@ depends: [
   "webtransport"
   "webtransport-quiche"
   "lwt" {>= "5.7"}
+  "bigstringaf"
   "mtime"
   "ipaddr"
   "odoc" {with-doc}

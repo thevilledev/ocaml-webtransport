@@ -33,11 +33,13 @@
   mirage-crypto-rng
   ptime
   digestif
-  (alcotest :with-test)))
+  cmdliner
+  (alcotest :with-test)
+  (crowbar :with-test)))
 
 (package
  (name webtransport-quiche)
- (synopsis "quiche QUIC backend for webtransport")
+ (synopsis "Quiche QUIC backend for webtransport")
  (description
   "Implements the webtransport Quic_backend.S interface on top of the quiche\nbindings. This is the default QUIC engine for webtransport-eio and\nwebtransport-lwt.")
  (depends
@@ -71,5 +73,6 @@
   webtransport
   webtransport-quiche
   (lwt (>= 5.7))
+  bigstringaf
   mtime
   ipaddr))

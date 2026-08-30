@@ -1,0 +1,4 @@
+(test
+ (name test_fuzz)
+ (package webtransport)
+ (libraries webtransport wt_qpack wt_mock crowbar bigstringaf))
