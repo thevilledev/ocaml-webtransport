@@ -1,0 +1,4 @@
+(test
+ (name test_initial_from_quiche)
+ (package webtransport-quiche)
+ (libraries quiche purequic wt_certs bigstringaf alcotest))

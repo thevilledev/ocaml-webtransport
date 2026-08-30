@@ -1,5 +1,5 @@
 (library
  (name webtransport_lwt)
  (public_name webtransport-lwt)
- (libraries webtransport webtransport_quiche lwt lwt.unix bigstringaf ipaddr
+ (libraries webtransport lwt lwt.unix bigstringaf ipaddr
    ipaddr.unix mtime mtime.clock.os))

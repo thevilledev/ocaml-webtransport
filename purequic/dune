@@ -1,0 +1,4 @@
+(library
+ (name purequic)
+ (public_name purequic)
+ (libraries bigstringaf digestif kdf.hkdf mirage-crypto eqaf))

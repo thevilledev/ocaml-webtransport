@@ -1,0 +1,4 @@
+(library
+ (name webtransport_purequic)
+ (public_name webtransport-purequic)
+ (libraries purequic webtransport bigstringaf))

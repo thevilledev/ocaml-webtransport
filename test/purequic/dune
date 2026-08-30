@@ -1,0 +1,4 @@
+(tests
+ (names test_purequic fuzz_purequic)
+ (package purequic)
+ (libraries purequic alcotest crowbar bigstringaf))

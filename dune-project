@@ -58,7 +58,7 @@
   (ocaml (>= 5.2))
   dune
   webtransport
-  webtransport-quiche
+  (webtransport-quiche :with-test)
   (eio (>= 1.2))
   (eio_main :with-test)
   mtime))
@@ -72,8 +72,43 @@
   (ocaml (>= 5.2))
   dune
   webtransport
-  webtransport-quiche
+  (webtransport-quiche :with-test)
   (lwt (>= 5.7))
   bigstringaf
   mtime
   ipaddr))
+
+(package
+ (name purequic)
+ (synopsis "Pure-OCaml QUIC v1 engine, sans-io (unreleased)")
+ (description
+  "A sans-io implementation of QUIC version 1 (RFC 9000/9001/9002) with\nunreliable datagrams (RFC 9221) and reliable stream resets\n(draft-ietf-quic-reliable-stream-reset), written in OCaml on\nmirage-crypto. No sockets, clocks, effects or C library dependencies;\ndrive it from any runtime. Unreleased while interop hardening is in\nprogress.")
+ (depends
+  (ocaml (>= 5.2))
+  dune
+  bigstringaf
+  digestif
+  kdf
+  mirage-crypto
+  mirage-crypto-ec
+  mirage-crypto-pk
+  mirage-crypto-rng
+  x509
+  eqaf
+  ptime
+  (alcotest :with-test)
+  (crowbar :with-test)))
+
+(package
+ (name webtransport-purequic)
+ (synopsis "Pure-OCaml QUIC backend for webtransport (unreleased)")
+ (description
+  "Implements the webtransport Quic_backend.S interface on top of the\npurequic engine: a QUIC backend with no C library or Rust toolchain\nrequirement. Unreleased while interop hardening is in progress.")
+ (depends
+  (ocaml (>= 5.2))
+  dune
+  purequic
+  webtransport
+  mirage-crypto-rng
+  ca-certs
+  ptime))
