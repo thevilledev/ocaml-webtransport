@@ -1,0 +1,4 @@
+(test
+ (name test_quiche_smoke)
+ (package quiche)
+ (libraries quiche bigstringaf alcotest))

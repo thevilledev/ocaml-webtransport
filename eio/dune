@@ -1,0 +1,4 @@
+(library
+ (name webtransport_eio)
+ (public_name webtransport-eio)
+ (libraries webtransport webtransport_quiche eio cstruct bigstringaf mtime))

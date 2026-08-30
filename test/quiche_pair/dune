@@ -1,0 +1,4 @@
+(test
+ (name test_quiche_pair)
+ (package webtransport-quiche)
+ (libraries quiche wt_certs bigstringaf alcotest unix))

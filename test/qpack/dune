@@ -1,0 +1,4 @@
+(test
+ (name test_qpack)
+ (package webtransport)
+ (libraries wt_qpack alcotest))

@@ -1,0 +1,4 @@
+(test
+ (name test_core)
+ (package webtransport)
+ (libraries webtransport bigstringaf alcotest))

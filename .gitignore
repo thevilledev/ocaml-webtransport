@@ -1,0 +1,6 @@
+_build/
+_opam/
+*.install
+.DS_Store
+node_modules/
+interop/chrome/test-results/

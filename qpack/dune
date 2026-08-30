@@ -1,0 +1,3 @@
+(library
+ (name wt_qpack)
+ (public_name webtransport.qpack))

@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Monthly run against current Chrome stable to catch browser drift.
+    - cron: "17 6 3 * *"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        ocaml: ["5.2", "5.4"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install quiche (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cloudflare-quiche
+
+      - name: Read quiche pin
+        id: quiche
+        shell: bash
+        run: echo "tag=$(cat interop/quiche.version)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout quiche (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v4
+        with:
+          repository: cloudflare/quiche
+          ref: ${{ steps.quiche.outputs.tag }}
+          path: .quiche-src
+          submodules: recursive
+
+      - name: Rust cache (Linux)
+        if: runner.os == 'Linux'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .quiche-src
+
+      - name: Build quiche (Linux)
+        if: runner.os == 'Linux'
+        working-directory: .quiche-src
+        run: cargo build --release --features ffi,qlog,pkg-config-meta
+
+      - name: Export quiche pkg-config path (Linux)
+        if: runner.os == 'Linux'
+        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build @all
+
+      - name: Test
+        run: opam exec -- dune runtest

@@ -1,0 +1,5 @@
+(test
+ (name test_eio_echo)
+ (package webtransport-eio)
+ (libraries webtransport_eio webtransport_quiche wt_certs eio eio_main
+   bigstringaf))

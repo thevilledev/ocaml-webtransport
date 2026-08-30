@@ -1,0 +1,4 @@
+(library
+ (name webtransport_lwt)
+ (public_name webtransport-lwt)
+ (libraries webtransport webtransport_quiche lwt mtime ipaddr))

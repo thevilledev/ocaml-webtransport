@@ -1,0 +1,4 @@
+(library
+ (name webtransport_quiche)
+ (public_name webtransport-quiche)
+ (libraries quiche webtransport))
