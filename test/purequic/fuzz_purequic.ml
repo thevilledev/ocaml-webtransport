@@ -8,6 +8,95 @@ module P = Purequic
 
 let bs_of_string s = Bigstringaf.of_string s ~off:0 ~len:(String.length s)
 
+(* A deterministically established pure<->pure pair, built once; the
+   hostile-datagram target injects into it and asserts survival. *)
+let established_pair =
+  lazy
+    (Mirage_crypto_rng.set_default_generator
+       (Mirage_crypto_rng.create ~seed:"fuzz-pair"
+          (module Mirage_crypto_rng.Fortuna));
+     let key = X509.Private_key.generate ~seed:"fuzz-cert" `P256 in
+     let dn =
+       X509.Distinguished_name.
+         [ Relative_distinguished_name.singleton (CN "fuzz") ]
+     in
+     let csr = Result.get_ok (X509.Signing_request.create dn ~digest:`SHA256 key) in
+     let cert =
+       Result.get_ok
+         (X509.Signing_request.sign csr ~valid_from:Ptime.epoch
+            ~valid_until:
+              (match Ptime.of_date (2099, 1, 1) with
+              | Some t -> t
+              | None -> assert false)
+            ~digest:`SHA256 key dn)
+     in
+     let rng seed =
+       let state = ref seed in
+       fun n ->
+         String.init n (fun _ ->
+             state := (!state * 2862933555777941757) + 3037000493;
+             Char.chr ((!state lsr 33) land 0xff))
+     in
+     let base role priv =
+       {
+         P.Conn.role;
+         alpn = [ "fz" ];
+         cert_chain = (if role = `Server then [ cert ] else []);
+         priv_key = priv;
+         verify = `None;
+         time = (fun () -> None);
+         rng = rng (match role with `Client -> 11 | `Server -> 22);
+         enable_datagrams = true;
+         reliable_reset = true;
+         initial_max_data = 1_000_000;
+         initial_max_stream_data = 100_000;
+         initial_max_streams_bidi = 16;
+         initial_max_streams_uni = 16;
+         max_idle_ns = 3_600_000_000_000L;
+         max_udp_payload = 1350;
+       }
+     in
+     let now = ref 1_000_000_000L in
+     let dcid = String.make 16 'd' in
+     let client =
+       Result.get_ok
+         (P.Conn.client (base `Client None) ~server_name:(Some "fuzz")
+            ~scid:(String.make 16 'c') ~dcid ~peer:("\001\002\003\004", 1)
+            ~now:!now)
+     in
+     let server =
+       Result.get_ok
+         (P.Conn.server_with_odcid (base `Server (Some key))
+            ~scid:(String.make 16 's') ~odcid:dcid
+            ~peer:("\004\003\002\001", 2) ~now:!now)
+     in
+     let buf = Bigstringaf.create 2048 in
+     let pump src dst =
+       let moved = ref false in
+       let rec go () =
+         match P.Conn.send src ~now:!now buf with
+         | `Done -> ()
+         | `Packet (n, _) ->
+             moved := true;
+             P.Conn.recv dst ~now:!now buf ~off:0 ~len:n
+               ~from:("\009\009\009\009", 9);
+             go ()
+       in
+       go ();
+       !moved
+     in
+     let rec drive i =
+       if i > 0 && not (P.Conn.is_established client && P.Conn.is_established server)
+       then begin
+         let m1 = pump client server and m2 = pump server client in
+         if (not m1) && not m2 then now := Int64.add !now 30_000_000L;
+         drive (i - 1)
+       end
+     in
+     drive 200;
+     assert (P.Conn.is_established client && P.Conn.is_established server);
+     (client, server, now))
+
 let () =
   Crowbar.add_test ~name:"varint decode total" [ Crowbar.bytes ] (fun s ->
       let buf = bs_of_string s in
@@ -112,6 +201,76 @@ let () =
             Crowbar.check (norm f = norm f')
         | Ok _ -> Crowbar.fail "frame count"
         | Error e -> Crowbar.fail e);
+  (* CRYPTO reassembly: random segmentation/duplication/reordering of a
+     known transcript reassembles to the original *)
+  Crowbar.add_test ~name:"crypto reassembly"
+    [ Crowbar.list (Crowbar.pair (Crowbar.range 200) (Crowbar.range 50)) ]
+    (fun cuts ->
+      let original = String.init 256 (fun i -> Char.chr (i land 0xff)) in
+      let cs = P.Crypto_stream.create () in
+      let out = Buffer.create 256 in
+      let deliver s = Buffer.add_string out s in
+      (* deliver shuffled, overlapping segments, then the whole thing *)
+      List.iter
+        (fun (off, len) ->
+          let off = min off (String.length original - 1) in
+          let len = min (len + 1) (String.length original - off) in
+          match
+            P.Crypto_stream.recv cs ~off (String.sub original off len) ~deliver
+          with
+          | Ok () | Error _ -> ())
+        cuts;
+      (match P.Crypto_stream.recv cs ~off:0 original ~deliver with
+      | Ok () | Error _ -> ());
+      let got = Buffer.contents out in
+      Crowbar.check
+        (String.length got >= String.length original
+        && String.sub got 0 (String.length original) = original));
+  (* TLS handshake-message feeding is total on hostile bytes *)
+  Crowbar.add_test ~name:"tls handle total"
+    [ Crowbar.range 3; Crowbar.bytes ]
+    (fun lvl s ->
+      let cfg =
+        Result.get_ok
+          (Purequic_tls.Tls.client_config ~alpn:[ "x" ] ~transport_params:"tp"
+             ~rng:(fun n -> String.make n 'r')
+             ())
+      in
+      let t = Purequic_tls.Tls.create cfg in
+      Purequic_tls.Tls.start t;
+      let level =
+        match lvl with
+        | 0 -> Purequic_tls.Tls.Initial
+        | 1 -> Purequic_tls.Tls.Handshake
+        | _ -> Purequic_tls.Tls.Application
+      in
+      Purequic_tls.Tls.handle t ~level s;
+      let rec drain n =
+        if n > 0 then
+          match Purequic_tls.Tls.next_event t with
+          | Some _ -> drain (n - 1)
+          | None -> ()
+      in
+      drain 1000;
+      Crowbar.check true);
+  (* hostile datagrams into an established connection: never raises,
+     event drain terminates, connection survives garbage (undecryptable
+     input must be dropped silently) *)
+  Crowbar.add_test ~name:"established conn survives hostile datagrams"
+    [ Crowbar.bytes ]
+    (fun s ->
+      let _, server, now = Lazy.force established_pair in
+      let b = bs_of_string s in
+      P.Conn.recv server ~now:!now b ~off:0 ~len:(String.length s)
+        ~from:("\066\066\066\066", 666);
+      let rec drain n =
+        if n > 0 then
+          match P.Conn.next_event server with
+          | Some _ -> drain (n - 1)
+          | None -> ()
+      in
+      drain 10_000;
+      Crowbar.check (not (P.Conn.is_closed server)));
   Crowbar.add_test ~name:"tparams encode/decode roundtrip"
     [ v_gen; v_gen; v_gen; Crowbar.bool; Crowbar.bool ]
     (fun max_data msd streams dam rr ->

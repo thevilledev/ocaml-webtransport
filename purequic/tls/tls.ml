@@ -347,7 +347,11 @@ let client_on_ee t body raw =
   | Ok exts -> (
       let alpn =
         match W.find_ext exts W.ext_alpn with
-        | None -> Error "EE without ALPN"
+        | None ->
+            Error
+              (Printf.sprintf "EE without ALPN (extensions: %s)"
+                 (String.concat ","
+                    (List.map (fun (id, _) -> string_of_int id) exts)))
         | Some raw -> (
             match W.parse_alpn_payload raw with
             | Ok [ proto ] when List.mem proto t.cfg.alpn -> Ok proto

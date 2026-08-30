@@ -1,4 +1,0 @@
-(executables
- (names raw_echo_server raw_echo_client)
- (libraries webtransport_eio webtransport_quiche wt_certs eio eio_main
-   bigstringaf))

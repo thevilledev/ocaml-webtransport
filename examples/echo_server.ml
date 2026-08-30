@@ -59,7 +59,13 @@ let () =
   Switch.run @@ fun sw ->
   let certs = Wt_certs.generate () in
   Wt_certs.with_temp_files certs @@ fun ~cert_file ~key_file ->
-  let module B = Webtransport_quiche in
+  (* WT_BACKEND=pure selects the pure-OCaml QUIC engine. *)
+  let module B =
+    (val match Sys.getenv_opt "WT_BACKEND" with
+         | None | Some "quiche" -> (module Webtransport_quiche : Webtransport.Quic_backend.S)
+         | Some "pure" -> (module Webtransport_purequic)
+         | Some other -> failwith ("unknown WT_BACKEND: " ^ other))
+  in
   let cfg =
     match
       B.config ~role:`Server ~alpn:[ "h3" ] ~cert_chain_pem_file:cert_file

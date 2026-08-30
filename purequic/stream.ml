@@ -12,6 +12,7 @@ type send = {
   mutable fin_pending : bool;  (* fin needs (re)transmission *)
   mutable fin_acked : bool;
   mutable reset : (int * int) option;  (* code, final_size *)
+  mutable reset_reliable : int option;  (* RESET_STREAM_AT reliable size *)
   mutable reset_pending : bool;  (* RESET_STREAM needs (re)transmission *)
   mutable reset_acked : bool;
   mutable credit : int;  (* peer's MAX_STREAM_DATA for this stream *)
@@ -46,6 +47,7 @@ let mk_send ~credit =
     fin_pending = false;
     fin_acked = false;
     reset = None;
+    reset_reliable = None;
     reset_pending = false;
     reset_acked = false;
     credit;
@@ -96,24 +98,39 @@ let send_fin s =
     s.fin_pending <- true
   end
 
-let send_reset s ~code =
+let send_reset ?reliable s ~code =
   if s.reset = None then begin
     s.reset <- Some (code, send_end s);
+    s.reset_reliable <- reliable;
     s.reset_pending <- true;
-    (* nothing pending transmits after a reset *)
-    Ranges.drop_below s.pending max_int
+    (* only bytes below the reliable size (if any) still transmit *)
+    match reliable with
+    | None -> Ranges.drop_below s.pending max_int
+    | Some r ->
+        let keep = Ranges.create () in
+        Ranges.iter_desc s.pending (fun ~lo ~hi ->
+            if lo < r then Ranges.insert keep ~lo ~hi:(min hi (r - 1)));
+        Ranges.drop_below s.pending max_int;
+        Ranges.iter_desc keep (fun ~lo ~hi -> Ranges.insert s.pending ~lo ~hi)
   end
+
+(* Transmittable data remains after a reliable reset, below its size. *)
+let data_allowed s =
+  match (s.reset, s.reset_reliable) with
+  | None, _ -> true
+  | Some _, Some _ -> true
+  | Some _, None -> false
 
 let has_send_pending s =
   s.reset_pending
-  || (s.reset = None
+  || (data_allowed s
      && ((not (Ranges.is_empty s.pending))
-        || (s.fin_pending && s.fin_queued)))
+        || (s.reset = None && s.fin_pending && s.fin_queued)))
 
 (* Next chunk to transmit: lowest pending contiguous range, clipped to
    [max]. Returns (off, data, fin). A pure-fin chunk has empty data. *)
 let send_take s ~max =
-  if s.reset <> None then None
+  if not (data_allowed s) then None
   else
     match Ranges.smallest s.pending with
     | Some lo when max > 0 ->
@@ -122,14 +139,15 @@ let send_take s ~max =
         Ranges.drop_below s.pending (hi + 1);
         let data = Buffer.sub s.buf (lo - s.base) (hi - lo + 1) in
         let fin =
-          s.fin_queued && s.fin_pending && hi + 1 = send_end s
+          s.reset = None && s.fin_queued && s.fin_pending
+          && hi + 1 = send_end s
           && Ranges.is_empty s.pending
         in
         if fin then s.fin_pending <- false;
         Some (lo, data, fin)
     | Some _ -> None
     | None ->
-        if s.fin_queued && s.fin_pending then begin
+        if s.reset = None && s.fin_queued && s.fin_pending then begin
           s.fin_pending <- false;
           Some (send_end s, "", true)
         end
@@ -149,7 +167,10 @@ let send_on_acked s ~lo ~hi ~fin =
   end
 
 let send_on_lost s ~lo ~hi ~fin =
-  if s.reset = None then begin
+  if data_allowed s then begin
+    let hi =
+      match s.reset_reliable with Some r -> min hi (r - 1) | None -> hi
+    in
     if hi >= lo then begin
       (* requeue only what is not already acked *)
       let rec requeue lo =

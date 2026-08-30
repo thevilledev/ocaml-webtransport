@@ -25,6 +25,7 @@ module Impl = struct
     | Stream_readable of int
     | Stream_writable of int
     | Stream_reset of { id : int; code : int }
+    | Stream_reset_at of { id : int; code : int; reliable_size : int }
     | Stream_stopped of { id : int; code : int }
     | Stream_credit
     | Datagram_readable
@@ -169,6 +170,11 @@ module Impl = struct
   let stream_reset t ~id ~code =
     Hashtbl.replace t.resets id code;
     Ok ()
+
+  let supports_reset_at _ = false
+
+  (* the mock records the degrade the same way a plain reset is recorded *)
+  let stream_reset_at t ~id ~code ~reliable_size:_ = stream_reset t ~id ~code
 
   let stream_stop_sending t ~id ~code =
     Hashtbl.replace t.stops id code;

@@ -239,6 +239,7 @@ module Impl = struct
     | Stream_readable of int
     | Stream_writable of int
     | Stream_reset of { id : int; code : int }
+    | Stream_reset_at of { id : int; code : int; reliable_size : int }
     | Stream_stopped of { id : int; code : int }
     | Stream_credit
     | Datagram_readable
@@ -266,6 +267,8 @@ module Impl = struct
               | Conn.Stream_readable id -> Stream_readable id
               | Conn.Stream_writable id -> Stream_writable id
               | Conn.Stream_reset { id; code } -> Stream_reset { id; code }
+              | Conn.Stream_reset_at { id; code; reliable_size } ->
+                  Stream_reset_at { id; code; reliable_size }
               | Conn.Stream_stopped { id; code } -> Stream_stopped { id; code }
               | Conn.Stream_credit -> Stream_credit
               | Conn.Datagram_readable -> Datagram_readable
@@ -327,6 +330,16 @@ module Impl = struct
   let stream_reset t ~id ~code =
     match live_opt t with
     | Some l -> Conn.stream_reset l.conn ~id ~code
+    | None -> rw_default
+
+  let supports_reset_at t =
+    match live_opt t with
+    | Some l -> Conn.supports_reset_at l.conn
+    | None -> false
+
+  let stream_reset_at t ~id ~code ~reliable_size =
+    match live_opt t with
+    | Some l -> Conn.stream_reset_at l.conn ~id ~code ~reliable_size
     | None -> rw_default
 
   let stream_stop_sending t ~id ~code =

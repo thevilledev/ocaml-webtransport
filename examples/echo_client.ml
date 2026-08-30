@@ -15,7 +15,13 @@ let () =
   let message = arg 3 "hello from ocaml" in
   Eio_main.run @@ fun env ->
   Switch.run @@ fun sw ->
-  let module B = Webtransport_quiche in
+  (* WT_BACKEND=pure selects the pure-OCaml QUIC engine. *)
+  let module B =
+    (val match Sys.getenv_opt "WT_BACKEND" with
+         | None | Some "quiche" -> (module Webtransport_quiche : Webtransport.Quic_backend.S)
+         | Some "pure" -> (module Webtransport_purequic)
+         | Some other -> failwith ("unknown WT_BACKEND: " ^ other))
+  in
   let cfg =
     match
       B.config ~role:`Client ~alpn:[ "h3" ] ~verify:`None

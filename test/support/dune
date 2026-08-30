@@ -1,3 +1,4 @@
 (library
  (name wt_test_backend)
+ (package webtransport-quiche)
  (libraries webtransport webtransport_quiche webtransport_purequic))

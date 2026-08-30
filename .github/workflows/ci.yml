@@ -9,7 +9,42 @@ on:
     - cron: "17 6 3 * *"
 
 jobs:
-  build:
+  # The pure-OCaml backend: no Rust toolchain, no libquiche, no brew.
+  # This is the install experience opam users of webtransport-purequic get.
+  pure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        ocaml: ["5.2", "5.4"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+
+      - name: Install dependencies (quiche-free)
+        run: |
+          opam install ./purequic.opam ./webtransport.opam ./webtransport-purequic.opam --deps-only --with-test
+          opam install ./webtransport-eio.opam ./webtransport-lwt.opam --deps-only
+
+      - name: Build (quiche-free packages + driver libraries)
+        run: |
+          opam exec -- dune build --only-packages purequic,webtransport,webtransport-purequic @install
+          opam exec -- dune build eio lwt
+
+      - name: Test (vectors, fuzz, TLS, deterministic pair)
+        run: >
+          opam exec -- dune build
+          --only-packages purequic,webtransport,webtransport-purequic
+          @test/purequic/runtest @test/pure_pair/runtest @test/unit/runtest
+          @test/engine/runtest @test/qpack/runtest @test/fuzz/runtest
+
+  # The full matrix: quiche + pure side by side, cross-implementation
+  # tests, and the Chrome suite against both backends.
+  full:
     strategy:
       fail-fast: false
       matrix:
@@ -63,11 +98,84 @@ jobs:
       - name: Build
         run: opam exec -- dune build @all
 
-      - name: Test
+      - name: Test (quiche backend + cross-implementation)
         run: opam exec -- dune runtest
 
+      - name: Driver suites on the pure backend
+        env:
+          WT_BACKEND: pure
+        run: |
+          opam exec -- dune exec test/eio/test_eio_echo.exe
+          opam exec -- dune exec test/interop_self/test_wt_self.exe
+          opam exec -- dune exec test/lwt/test_lwt_self.exe
+
       # GitHub-hosted runners ship Google Chrome on both Linux and macOS.
-      - name: Chrome interop
+      - name: Chrome interop (quiche backend)
         env:
           WT_CHROME: "1"
         run: opam exec -- dune exec test/chrome/test_chrome.exe
+
+      - name: Chrome interop (pure backend)
+        env:
+          WT_CHROME: "1"
+          WT_BACKEND: pure
+        run: opam exec -- dune exec test/chrome/test_chrome.exe
+
+  # webtransport-go, both directions: v0.9 for both backends, and v0.13
+  # (which hard-requires RESET_STREAM_AT) for the pure backend.
+  go-interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read quiche pin
+        id: quiche
+        run: echo "tag=$(cat interop/quiche.version)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout quiche
+        uses: actions/checkout@v4
+        with:
+          repository: cloudflare/quiche
+          ref: ${{ steps.quiche.outputs.tag }}
+          path: .quiche-src
+          submodules: recursive
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .quiche-src
+
+      - name: Build quiche
+        working-directory: .quiche-src
+        run: cargo build --release --package quiche --features ffi,qlog,pkg-config-meta
+
+      - name: Export quiche pkg-config path
+        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            interop/go/go.sum
+            interop/go13/go.sum
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build @all
+
+      - name: Go interop (quiche backend, webtransport-go v0.9)
+        env:
+          WT_GO: "1"
+        run: opam exec -- dune exec test/interop_go/test_go_interop.exe
+
+      - name: Go interop (pure backend, v0.9 + v0.13)
+        env:
+          WT_GO: "1"
+          WT_BACKEND: pure
+        run: opam exec -- dune exec test/interop_go/test_go_interop.exe

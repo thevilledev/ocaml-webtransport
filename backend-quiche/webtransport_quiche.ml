@@ -24,6 +24,7 @@ module Impl = struct
     | Stream_readable of int
     | Stream_writable of int
     | Stream_reset of { id : int; code : int }
+    | Stream_reset_at of { id : int; code : int; reliable_size : int }
     | Stream_stopped of { id : int; code : int }
     | Stream_credit
     | Datagram_readable
@@ -325,6 +326,12 @@ module Impl = struct
     | Ok () -> Ok ()
     | Error Q.Done -> Ok ()
     | Error e -> Error (rw_error e)
+
+  let supports_reset_at _ = false
+
+  (* quiche cannot deliver a reliable prefix; degrade to a plain reset
+     (cloudflare/quiche#2564). *)
+  let stream_reset_at t ~id ~code ~reliable_size:_ = stream_reset t ~id ~code
 
   let stream_stop_sending t ~id ~code =
     poke t;

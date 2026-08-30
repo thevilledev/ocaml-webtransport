@@ -382,6 +382,56 @@ let test_reset () =
     (fun () -> !reset_code <> None);
   Alcotest.(check (option int)) "reset code" (Some 77) !reset_code
 
+let test_reset_at () =
+  let _, now, client, server, loss = handshake () in
+  Alcotest.(check bool) "peer negotiated reliable reset" true
+    (B.supports_reset_at client);
+  let id =
+    match B.open_stream client ~dir:`Uni with
+    | Ok id -> id
+    | Error _ -> Alcotest.fail "open uni"
+  in
+  (* queue data and reset before anything is pumped: the sender must
+     transmit only the reliable prefix *)
+  write_str client ~id "reliable-prefix|and-junk-after";
+  let reliable = String.length "reliable-prefix|" in
+  (match B.stream_reset_at client ~id ~code:99 ~reliable_size:reliable with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "stream_reset_at");
+  let opened = ref None in
+  let seen_event = ref None in
+  let watch side e =
+    match (side, e) with
+    | `Server, B.Stream_opened { id; dir = `Uni } -> opened := Some id
+    | `Server, B.Stream_reset_at { code; reliable_size; _ } ->
+        seen_event := Some (code, reliable_size)
+    | _ -> ()
+  in
+  drive ~now ~loss ~client ~server ~on_event:watch (fun () -> !opened <> None);
+  let sid = Option.get !opened in
+  let acc = Buffer.create 64 in
+  let tmp = Bigstringaf.create 256 in
+  let outcome = ref None in
+  drive ~now ~loss ~client ~server ~on_event:watch (fun () ->
+      let rec go () =
+        match B.stream_recv server ~id:sid tmp ~off:0 ~len:256 with
+        | Ok (n, _) ->
+            Buffer.add_string acc (Bigstringaf.substring tmp ~off:0 ~len:n);
+            go ()
+        | Error (`Reset c) ->
+            outcome := Some c;
+            true
+        | Error `Would_block -> false
+        | Error `Fin -> Alcotest.fail "unexpected clean fin"
+        | Error _ -> Alcotest.fail "unexpected read error"
+      in
+      go ());
+  Alcotest.(check (option int)) "reset code delivered" (Some 99) !outcome;
+  Alcotest.(check (option (pair int int))) "reset_at event" (Some (99, reliable))
+    !seen_event;
+  Alcotest.(check string) "reliable prefix delivered" "reliable-prefix|"
+    (Buffer.contents acc)
+
 let () =
   Alcotest.run "pure_pair"
     [
@@ -395,5 +445,6 @@ let () =
           ("loss recovery 20%", `Quick, test_loss_recovery);
           ("key update", `Quick, test_key_update);
           ("stream reset", `Quick, test_reset);
+          ("reliable reset (RESET_STREAM_AT)", `Quick, test_reset_at);
         ] );
     ]

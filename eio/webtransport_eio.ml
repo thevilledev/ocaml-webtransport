@@ -352,7 +352,7 @@ module Raw = struct
                   Core_conn.mark_dead st
                     { code; reason; remote = not local; app }
               | B.Stream_readable _ | B.Stream_writable _ | B.Stream_credit
-              | B.Stream_reset _ | B.Stream_stopped _ ->
+              | B.Stream_reset _ | B.Stream_reset_at _ | B.Stream_stopped _ ->
                   ());
               go ()
         in

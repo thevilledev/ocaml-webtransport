@@ -114,6 +114,10 @@ module type S = sig
     | Stream_readable of int
     | Stream_writable of int
     | Stream_reset of { id : int; code : int }  (* peer sent RESET_STREAM *)
+    | Stream_reset_at of { id : int; code : int; reliable_size : int }
+      (* peer sent RESET_STREAM_AT (reliable reset): data below
+         [reliable_size] is still delivered by [stream_recv] before the
+         [`Reset] surfaces. Only capable backends emit this. *)
     | Stream_stopped of { id : int; code : int }  (* peer sent STOP_SENDING *)
     | Stream_credit  (* peer raised MAX_STREAMS: blocked opens may retry *)
     | Datagram_readable
@@ -135,6 +139,15 @@ module type S = sig
   val stream_capacity : t -> id:int -> int rw
   val stream_finish : t -> id:int -> unit rw
   val stream_reset : t -> id:int -> code:int -> unit rw
+
+  (* True once the peer negotiated reliable resets
+     (draft-ietf-quic-reliable-stream-reset). *)
+  val supports_reset_at : t -> bool
+
+  (* Abort the send side but deliver bytes below [reliable_size] first.
+     Degrades to [stream_reset] when the backend or peer lacks support. *)
+  val stream_reset_at : t -> id:int -> code:int -> reliable_size:int -> unit rw
+
   val stream_stop_sending : t -> id:int -> code:int -> unit rw
 
   val dgram_send : t -> Bigstringaf.t -> off:int -> len:int -> unit rw

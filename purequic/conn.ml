@@ -43,6 +43,7 @@ type event =
   | Stream_readable of int
   | Stream_writable of int
   | Stream_reset of { id : int; code : int }
+  | Stream_reset_at of { id : int; code : int; reliable_size : int }
   | Stream_stopped of { id : int; code : int }
   | Stream_credit
   | Datagram_readable
@@ -666,7 +667,7 @@ let handle_frame t sp ~now (f : Frame.t) =
               with
               | `Err e -> raise (Proto_violation (0x06, e))
               | `Ok _ ->
-                  emit t (Stream_reset { id; code });
+                  emit t (Stream_reset_at { id; code; reliable_size });
                   emit t (Stream_readable id))))
   | Frame.Stop_sending { id; code } -> (
       match get_stream t id with
@@ -1072,10 +1073,15 @@ let build_frames t sp ~now ~budget ~allow_ae =
         | Some snd when snd.Stream.reset_pending -> (
             match snd.Stream.reset with
             | Some (code, final_size) ->
-                if
-                  push ~r:Recovery.Rtx_flags
-                    (Frame.Reset_stream { id; code; final_size })
-                then snd.Stream.reset_pending <- false
+                let frame =
+                  match snd.Stream.reset_reliable with
+                  | Some reliable_size ->
+                      Frame.Reset_stream_at
+                        { id; code; final_size; reliable_size }
+                  | None -> Frame.Reset_stream { id; code; final_size }
+                in
+                if push ~r:Recovery.Rtx_flags frame then
+                  snd.Stream.reset_pending <- false
             | None -> ())
         | _ -> ());
         (match s.Stream.recv with
@@ -1542,6 +1548,18 @@ let stream_finish t ~id : unit rw =
 let stream_reset t ~id ~code : unit rw =
   with_send t ~id (fun _ snd ->
       Stream.send_reset snd ~code;
+      Ok ())
+
+let supports_reset_at t =
+  match t.peer_params with
+  | Some p -> p.Tparams.reliable_reset
+  | None -> false
+
+let stream_reset_at t ~id ~code ~reliable_size : unit rw =
+  with_send t ~id (fun _ snd ->
+      if supports_reset_at t && t.cfg.reliable_reset then
+        Stream.send_reset ~reliable:reliable_size snd ~code
+      else Stream.send_reset snd ~code;
       Ok ())
 
 let stream_stop_sending t ~id ~code : unit rw =

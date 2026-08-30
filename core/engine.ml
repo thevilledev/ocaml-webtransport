@@ -921,7 +921,9 @@ let process t ~now =
                 notify t (Wt_stream_writable { stream_id = id })
             | _ -> ())
         | B.Stream_credit -> if not t.started then start t
-        | B.Stream_reset { id; _ } | B.Stream_stopped { id; _ } -> (
+        | B.Stream_reset { id; _ }
+        | B.Stream_reset_at { id; _ }
+        | B.Stream_stopped { id; _ } -> (
             match session t id with
             | Some s when s.sstate <> `Closed ->
                 end_session t s

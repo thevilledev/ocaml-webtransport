@@ -37,22 +37,38 @@ for engine traces.
 webtransport-eio / webtransport-lwt   runtimes: UDP sockets, timers, fibers/promises
 webtransport                          sans-io core: extended CONNECT, WT sessions,
                                       streams/datagrams/capsules, minimal HTTP/3 + QPACK
-webtransport-quiche                   Quic_backend.S adapter (default engine)
+webtransport-quiche                   Quic_backend.S adapter over libquiche (default)
+webtransport-purequic                 Quic_backend.S adapter over purequic
+purequic                              pure-OCaml QUIC v1 engine + minimal TLS 1.3
 quiche                                raw bindings to Cloudflare's libquiche
 ```
 
-The QUIC engine sits behind `Webtransport.Quic_backend.S`, so a pure-OCaml
-QUIC implementation can replace the C-backed one without changing the public
-API.
+The QUIC engine sits behind `Webtransport.Quic_backend.S`. Two engines are
+in-tree:
+
+- **quiche** (default): C bindings to Cloudflare's battle-tested libquiche.
+  Needs the system library and, on Linux CI-style setups, a Rust toolchain.
+- **purequic**: a sans-io QUIC v1 engine (RFC 9000/9001/9002 + RFC 9221
+  datagrams) with its own minimal TLS 1.3, written in OCaml on
+  mirage-crypto — no C library, no Rust. It also implements
+  RESET_STREAM_AT (draft-ietf-quic-reliable-stream-reset), which libquiche
+  does not, unlocking interop with current webtransport-go. Every entry
+  point takes an explicit monotonic timestamp and randomness is injected,
+  so whole connections replay deterministically under a scripted clock
+  (see `test/pure_pair`). Both backends pass the same suites, including
+  headless Chrome and webtransport-go, selected at run time with
+  `WT_BACKEND=quiche|pure` in the tests and examples.
 
 ## Requirements
 
 - OCaml >= 5.2
-- libquiche: `brew install cloudflare-quiche` (macOS), or build
+- for the quiche backend only — libquiche: `brew install cloudflare-quiche`
+  (macOS), or build
   [cloudflare/quiche](https://github.com/cloudflare/quiche) with
   `cargo build --release --features ffi,qlog,pkg-config-meta` and add the
   build directory to `PKG_CONFIG_PATH` (or set
-  `QUICHE_INCLUDE_DIR`/`QUICHE_LIB_DIR`).
+  `QUICHE_INCLUDE_DIR`/`QUICHE_LIB_DIR`). The purequic backend has no
+  system dependencies.
 
 ## Quick start
 
@@ -81,8 +97,11 @@ Opt-in interop suites:
 - `WT_CHROME=1 dune exec test/chrome/test_chrome.exe` — headless Chrome
   runs session/streams/datagrams/close against the server.
 - `WT_GO=1 dune exec test/interop_go/test_go_interop.exe` — both directions
-  against quic-go/webtransport-go (pinned to v0.9: v0.10+ requires
-  RESET_STREAM_AT, which libquiche does not implement yet).
+  against quic-go/webtransport-go v0.9 (the newest release the quiche
+  backend can speak: v0.10+ hard-requires RESET_STREAM_AT, which libquiche
+  does not implement). With `WT_BACKEND=pure` the suite additionally runs
+  both directions against webtransport-go v0.13 (`interop/go13`), which
+  negotiates RESET_STREAM_AT with the purequic engine.
 - `WT_QLOG_DIR=/tmp dune exec ...` — per-connection qlog traces (needs a
   libquiche built with the qlog feature; the Homebrew bottle omits it).
 - `WT_DEBUG=1` — engine event traces on stderr.

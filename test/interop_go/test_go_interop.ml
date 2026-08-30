@@ -7,21 +7,33 @@
 open Eio.Std
 module Wt = Webtransport_eio.Wt
 
-let go_dir () =
-  match Sys.getenv_opt "WT_GO_DIR" with
-  | Some d -> d
-  | None -> (
+let () =
+  Printexc.register_printer (function
+    | Webtransport_eio.Connection_closed { code; reason; remote; app } ->
+        Some
+          (Printf.sprintf
+             "Connection_closed { code = 0x%x; reason = %S; remote = %b; app = %b }"
+             code reason remote app)
+    | Webtransport_eio.Session_rejected status ->
+        Some (Printf.sprintf "Session_rejected %d" status)
+    | _ -> None)
+
+let go_dir sub =
+  match (Sys.getenv_opt "WT_GO_DIR", sub) with
+  | Some d, "go" -> d
+  | _ -> (
       (* dune exec runs from the project root; dune runtest from the test's
          _build directory. *)
       let candidates =
         [
-          "interop/go";
-          Filename.concat (Sys.getcwd ()) "../../../../interop/go";
+          Filename.concat "interop" sub;
+          Filename.concat (Sys.getcwd ())
+            (Filename.concat "../../../../interop" sub);
         ]
       in
       match List.find_opt Sys.file_exists candidates with
       | Some d -> d
-      | None -> failwith "cannot locate interop/go (set WT_GO_DIR)")
+      | None -> failwith ("cannot locate interop/" ^ sub ^ " (set WT_GO_DIR)"))
 
 let echo_handler session =
   Switch.run @@ fun sw ->
@@ -57,19 +69,13 @@ let echo_handler session =
     done
   with Webtransport_eio.Session_closed _ -> ()
 
-let () =
-  match Sys.getenv_opt "WT_GO" with
-  | None -> print_endline "go interop: skipped (set WT_GO=1 to run)"
-  | Some _ ->
-      Random.self_init ();
-      Eio_main.run @@ fun env ->
+let run_suite env ~label ~godir =
       Switch.run @@ fun sw ->
       let net = Eio.Stdenv.net env in
       let mono = Eio.Stdenv.mono_clock env in
       let clock = Eio.Stdenv.clock env in
       let proc = Eio.Stdenv.process_mgr env in
       let fs = Eio.Stdenv.fs env in
-      let godir = go_dir () in
       let bin = Filename.temp_file "wtinterop" ".bin" in
       Eio.Process.run proc ~cwd:Eio.Path.(fs / godir)
         [ "go"; "build"; "-o"; bin; "." ];
@@ -108,7 +114,7 @@ let () =
           Printf.sprintf "https://127.0.0.1:%d/echo" port;
         ];
       assert (!sessions_seen = 1);
-      print_endline "go-client -> ocaml-server: OK";
+      Printf.printf "%s-client -> ocaml-server: OK\n%!" label;
 
       (* --- Part B: our client -> Go server --- *)
       let r, w = Eio.Process.pipe ~sw proc in
@@ -162,8 +168,20 @@ let () =
       in
       dgram_roundtrip 5;
       Wt.Session.close ~code:0 session;
-      print_endline "ocaml-client -> go-server: OK";
+      Printf.printf "ocaml-client -> %s-server: OK\n%!" label;
       (try Eio.Process.signal server_proc Sys.sigkill with _ -> ());
       (try Sys.remove bin with _ -> ());
-      ignore clock;
+      ignore clock
+
+let () =
+  match Sys.getenv_opt "WT_GO" with
+  | None -> print_endline "go interop: skipped (set WT_GO=1 to run)"
+  | Some _ ->
+      Random.self_init ();
+      Eio_main.run @@ fun env ->
+      run_suite env ~label:"go" ~godir:(go_dir "go");
+      (* webtransport-go >= 0.10 hard-requires RESET_STREAM_AT, which only
+         the pure backend negotiates. *)
+      if Wt_test_backend.name () = "pure" then
+        run_suite env ~label:"go13" ~godir:(go_dir "go13");
       print_endline "go interop: PASS"
