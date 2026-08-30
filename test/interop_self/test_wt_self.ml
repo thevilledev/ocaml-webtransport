@@ -27,11 +27,40 @@ let () =
   let seen_paths = ref [] in
   let handler session =
     seen_paths := Wt.Session.path session :: !seen_paths;
-    (* Echo datagrams until the session ends. *)
+    Switch.run @@ fun hsw ->
+    (* Datagram echo. *)
+    Fiber.fork ~sw:hsw (fun () ->
+        try
+          while true do
+            ignore
+              (Wt.Session.send_datagram session
+                 (Wt.Session.recv_datagram session))
+          done
+        with Webtransport_eio.Session_closed _ -> ());
+    (* Uni: echo each incoming uni stream's payload on a fresh outgoing uni. *)
+    Fiber.fork ~sw:hsw (fun () ->
+        try
+          while true do
+            let st = Wt.accept_uni session in
+            Fiber.fork ~sw:hsw (fun () ->
+                try
+                  let data = Wt.Stream.read_all st in
+                  let out = Wt.open_uni session in
+                  Wt.Stream.write out data;
+                  Wt.Stream.close_write out
+                with Webtransport_eio.Session_closed _ -> ())
+          done
+        with Webtransport_eio.Session_closed _ -> ());
+    (* Bidi: echo on the same stream. *)
     try
       while true do
-        Wt.Session.send_datagram session (Wt.Session.recv_datagram session)
-        |> ignore
+        let st = Wt.accept_bidi session in
+        Fiber.fork ~sw:hsw (fun () ->
+            try
+              let data = Wt.Stream.read_all st in
+              Wt.Stream.write st data;
+              Wt.Stream.close_write st
+            with Webtransport_eio.Session_closed _ -> ())
       done
     with Webtransport_eio.Session_closed _ -> ()
   in
@@ -79,6 +108,29 @@ let () =
     | None -> failwith "datagram echo timed out"
   in
   dgram_roundtrip 5;
+
+  (* Bidi stream echo (server echoes on the same stream). *)
+  let bidi = Wt.open_bidi session in
+  Wt.Stream.write bidi "bidi-ping";
+  Wt.Stream.close_write bidi;
+  assert (Wt.Stream.read_all bidi = "bidi-ping");
+
+  (* A bigger transfer across many chunks. *)
+  let big = String.concat "," (List.init 20_000 string_of_int) in
+  let bidi2 = Wt.open_bidi session in
+  Fiber.both
+    (fun () ->
+      Wt.Stream.write bidi2 big;
+      Wt.Stream.close_write bidi2)
+    (fun () -> assert (Wt.Stream.read_all bidi2 = big));
+
+  (* Uni: send on ours, receive the echo on a server-initiated uni. *)
+  let uni = Wt.open_uni session in
+  Wt.Stream.write uni "uni-ping";
+  Wt.Stream.close_write uni;
+  let incoming = Wt.accept_uni session in
+  assert (Wt.Stream.read_all incoming = "uni-ping");
+
   Wt.Session.close ~code:0 session;
 
   (* Rejected session. *)

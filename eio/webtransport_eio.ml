@@ -502,6 +502,8 @@ module Wt = struct
     s_closed_p : (int * string) Promise.t;
     s_closed_r : (int * string) Promise.u;
     dgrams : string Eio.Stream.t;
+    bidi_q : int Eio.Stream.t;  (* peer-opened WT bidi streams *)
+    uni_q : int Eio.Stream.t;  (* peer-opened WT uni streams *)
   }
 
   let dgram_cap = 128
@@ -537,6 +539,8 @@ module Wt = struct
       s_closed_p;
       s_closed_r;
       dgrams = Eio.Stream.create 1024;
+      bidi_q = Eio.Stream.create max_int;
+      uni_q = Eio.Stream.create max_int;
     }
 
   let end_session_local s ~code ~message =
@@ -577,9 +581,17 @@ module Wt = struct
               ignore (Eio.Stream.take_nonblocking s.dgrams);
             Eio.Stream.add s.dgrams payload
         | None -> ())
-    | Engine.Wt_stream_opened _ | Engine.Wt_stream_readable _
-    | Engine.Wt_stream_writable _ ->
-        () (* M3: data streams *)
+    | Engine.Wt_stream_opened { sid; stream_id; dir } -> (
+        match Hashtbl.find_opt ctx.sessions sid with
+        | Some s -> (
+            match dir with
+            | `Bidi -> Eio.Stream.add s.bidi_q stream_id
+            | `Uni -> Eio.Stream.add s.uni_q stream_id)
+        | None -> ())
+    | Engine.Wt_stream_readable _ | Engine.Wt_stream_writable _ ->
+        (* progress is broadcast by [service]; blocked readers/writers
+           re-check *)
+        ()
     | Engine.Goaway -> ()
     | Engine.Conn_closed { code; reason; remote } ->
         Hashtbl.iter
@@ -632,6 +644,101 @@ module Wt = struct
           let code, message = Promise.await s.s_closed_p in
           raise (Session_closed (code, message)))
   end
+
+  module Stream = struct
+    type t = { s : session; id : int; dir : Engine.dir }
+
+    let id t = t.id
+    let session t = t.s
+
+    let wt_code_of_h3 h3 =
+      match Webtransport.Wt_error.of_h3 h3 with Some c -> c | None -> h3
+
+    (* Blocking read; [`Fin] at clean end of stream. *)
+    let read t buf ~off ~len =
+      Core_conn.locked_op t.s.st (fun () ->
+          match Engine.read_attached t.s.eng ~id:t.id buf ~off ~len with
+          | Ok (n, fin) -> if n = 0 && fin then Some `Fin else Some (`Data n)
+          | Error `Fin -> Some `Fin
+          | Error `Would_block -> None
+          | Error (`Reset h3) -> raise (Stream_reset_by_peer (wt_code_of_h3 h3))
+          | Error (`Stopped h3) ->
+              raise (Stream_stopped_by_peer (wt_code_of_h3 h3))
+          | Error `Invalid -> invalid_arg "Stream.read")
+
+    let read_all t =
+      let buf = Bigstringaf.create 16_384 in
+      let b = Buffer.create 256 in
+      let rec loop () =
+        match read t buf ~off:0 ~len:16_384 with
+        | `Data n ->
+            Buffer.add_string b (Bigstringaf.substring buf ~off:0 ~len:n);
+            loop ()
+        | `Fin -> Buffer.contents b
+      in
+      loop ()
+
+    (* Blocking write through the engine's per-stream buffer (so bytes order
+       behind the WT signal prefix), with a high-watermark for backpressure. *)
+    let high_watermark = 262_144
+
+    let write t data =
+      let len = String.length data in
+      let pos = ref 0 in
+      while !pos < len do
+        let chunk = min (len - !pos) 16_384 in
+        let piece = String.sub data !pos chunk in
+        Core_conn.locked_op t.s.st (fun () ->
+            if Engine.outbuf_len t.s.eng ~id:t.id > high_watermark then None
+            else begin
+              Engine.write_stream t.s.eng ~id:t.id piece;
+              Some ()
+            end);
+        pos := !pos + chunk
+      done
+
+    let close_write t =
+      Core_conn.command t.s.st (fun () ->
+          Engine.finish_stream t.s.eng ~id:t.id)
+
+    let reset t ~code =
+      Core_conn.command t.s.st (fun () ->
+          Engine.reset_wt_stream t.s.eng ~id:t.id ~code)
+
+    let stop_sending t ~code =
+      Core_conn.command t.s.st (fun () ->
+          Engine.stop_wt_stream t.s.eng ~id:t.id ~code)
+  end
+
+  let open_stream_blocking (s : session) ~dir =
+    let id =
+      Core_conn.locked_op s.st (fun () ->
+          match Engine.open_wt_stream s.eng ~sid:s.sid ~dir with
+          | Ok id -> Some id
+          | Error `Would_block -> None
+          | Error _ ->
+              let c, m =
+                match Promise.peek s.s_closed_p with
+                | Some ci -> ci
+                | None -> (0, "session not open")
+              in
+              raise (Session_closed (c, m)))
+    in
+    { Stream.s; id; dir }
+
+  let accept_stream_blocking (s : session) q dir =
+    Fiber.first
+      (fun () ->
+        let id = Eio.Stream.take q in
+        { Stream.s; id; dir })
+      (fun () ->
+        let code, message = Promise.await s.s_closed_p in
+        raise (Session_closed (code, message)))
+
+  let open_bidi s = open_stream_blocking s ~dir:`Bidi
+  let open_uni s = open_stream_blocking s ~dir:`Uni
+  let accept_bidi s = accept_stream_blocking s s.bidi_q `Bidi
+  let accept_uni s = accept_stream_blocking s s.uni_q `Uni
 
   (* ---- endpoints ---- *)
 

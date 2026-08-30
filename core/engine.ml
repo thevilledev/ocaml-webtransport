@@ -770,6 +770,65 @@ let drain_session t ~sid =
       send_capsule t ~id:sid (Capsule.encode_drain ())
   | _ -> ()
 
+(* Opens a WebTransport data stream on a session and writes its signal
+   prefix (0x54/0x41 varint + session id). All application writes to WT
+   streams must go through [write]/[write_fin] so they order behind the
+   (possibly buffered) prefix. *)
+let open_wt_stream t ~sid ~dir =
+  match session t sid with
+  | Some s when s.sstate = `Open -> (
+      let (C ((module B), h)) = t.bc in
+      match B.open_stream h ~dir with
+      | Ok id ->
+          s.data_streams <- id :: s.data_streams;
+          (match dir with
+          | `Bidi ->
+              (* Track for reads: the peer answers on the same stream. *)
+              Hashtbl.replace t.rstreams id
+                {
+                  rid = id;
+                  rbuf = Bytebuf.create ();
+                  rstate = Attached sid;
+                  rfin = false;
+                }
+          | `Uni -> ());
+          let b = Buffer.create 8 in
+          Varint.add_buffer b
+            (match dir with
+            | `Bidi -> Wire.Frame.wt_stream
+            | `Uni -> Wire.Uni_stream.wt);
+          Varint.add_buffer b sid;
+          write t ~id (Buffer.contents b);
+          Ok id
+      | Error `Would_block -> Error `Would_block
+      | Error _ -> Error `Invalid)
+  | _ -> Error `Invalid
+
+(* Application writes on WT streams (buffered against flow control). *)
+let write_stream t ~id data = write t ~id data
+let finish_stream t ~id = write t ~id "" ~fin:true
+
+(* Bytes buffered locally for [id]; drivers use this for backpressure. *)
+let outbuf_len t ~id =
+  match Hashtbl.find_opt t.wstreams id with
+  | Some w -> Bytebuf.length w.wout
+  | None -> 0
+
+(* Abrupt stream termination with WebTransport application error codes
+   (mapped into the reserved HTTP/3 range on the wire). *)
+let reset_wt_stream t ~id ~code =
+  let (C ((module B), h)) = t.bc in
+  (match Hashtbl.find_opt t.wstreams id with
+  | Some w ->
+      ignore (Bytebuf.take_all w.wout);
+      w.wfin_sent <- true
+  | None -> ());
+  ignore (B.stream_reset h ~id ~code:(Wt_error.to_h3 code))
+
+let stop_wt_stream t ~id ~code =
+  let (C ((module B), h)) = t.bc in
+  ignore (B.stream_stop_sending h ~id ~code:(Wt_error.to_h3 code))
+
 (* Sends a WebTransport datagram: quarter-stream-id prefix + payload.
    Returns false when the session is not open or the queue is full. *)
 let send_datagram t ~sid payload =

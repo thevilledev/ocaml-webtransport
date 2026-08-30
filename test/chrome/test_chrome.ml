@@ -47,6 +47,39 @@ const post = async obj => { try { await fetch('/result', {method:'POST', headers
     if (text !== 'browser-ping') throw new Error('bad echo: ' + text);
     steps.push('datagram-echo');
     log('datagram echoed');
+    // Bidi stream echo on the same stream.
+    const readAll = async stream => {
+      const chunks = [];
+      const r = stream.getReader();
+      for (;;) {
+        const { value, done } = await r.read();
+        if (value) chunks.push(...value);
+        if (done) break;
+      }
+      return new TextDecoder().decode(new Uint8Array(chunks));
+    };
+    const bidi = await wt.createBidirectionalStream();
+    const bw = bidi.writable.getWriter();
+    await bw.write(new TextEncoder().encode('stream-ping'));
+    await bw.close();
+    const echoedStream = await readAll(bidi.readable);
+    if (echoedStream !== 'stream-ping') throw new Error('bad bidi echo: ' + echoedStream);
+    steps.push('bidi-echo');
+    log('bidi stream echoed');
+    // Uni: send on ours; the server answers on a server-initiated uni.
+    const uni = await wt.createUnidirectionalStream();
+    const uw = uni.getWriter();
+    await uw.write(new TextEncoder().encode('uni-ping'));
+    await uw.close();
+    const incoming = wt.incomingUnidirectionalStreams.getReader();
+    const { value: inStream } = await Promise.race([
+      incoming.read(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('uni timeout')), 5000)),
+    ]);
+    const uniEchoed = await readAll(inStream);
+    if (uniEchoed !== 'uni-ping') throw new Error('bad uni echo: ' + uniEchoed);
+    steps.push('uni-echo');
+    log('uni stream echoed');
     await wt.close({ closeCode: 42, reason: 'done' });
     steps.push('closed');
     await post({ pass: true, steps });
@@ -120,6 +153,32 @@ let () =
       let close_seen = ref None in
       let handler session =
         incr established;
+        Switch.run @@ fun hsw ->
+        Fiber.fork ~sw:hsw (fun () ->
+            try
+              while true do
+                let st = Wt.accept_bidi session in
+                Fiber.fork ~sw:hsw (fun () ->
+                    try
+                      let data = Wt.Stream.read_all st in
+                      Wt.Stream.write st data;
+                      Wt.Stream.close_write st
+                    with Webtransport_eio.Session_closed _ -> ())
+              done
+            with Webtransport_eio.Session_closed _ -> ());
+        Fiber.fork ~sw:hsw (fun () ->
+            try
+              while true do
+                let st = Wt.accept_uni session in
+                Fiber.fork ~sw:hsw (fun () ->
+                    try
+                      let data = Wt.Stream.read_all st in
+                      let out = Wt.open_uni session in
+                      Wt.Stream.write out data;
+                      Wt.Stream.close_write out
+                    with Webtransport_eio.Session_closed _ -> ())
+              done
+            with Webtransport_eio.Session_closed _ -> ());
         try
           while true do
             ignore

@@ -4,9 +4,26 @@
 OCaml: reliable streams and unreliable datagrams over HTTP/3 + QUIC, built for
 interoperability with browsers.
 
-**Status: early development.** Targets draft-ietf-webtrans-http3-16 semantics
-with the draft-02 compatibility surface that shipping browsers (Chrome,
-Firefox, Safari) actually speak.
+**Status: early development — but already speaks to Chrome.** Targets
+draft-ietf-webtrans-http3-16 semantics with the draft-02 compatibility
+surface that shipping browsers (Chrome, Firefox, Safari) actually speak.
+Working today: session establishment (extended CONNECT, both `:protocol`
+tokens), bidirectional and unidirectional WebTransport streams (including
+server-initiated), datagrams, and close/drain capsules — verified against
+headless Chrome and in OCaml-to-OCaml self-interop.
+
+## Try it against Chrome
+
+```
+WT_CHROME=1 dune exec test/chrome/test_chrome.exe
+```
+
+This starts a WebTransport echo server plus a small page server, launches
+headless Chrome (override the binary with `CHROME_BIN`), and runs a
+session/streams/datagrams/close suite from the browser using
+`serverCertificateHashes` — no flags, no trusted CA needed. Set
+`WT_NETLOG=/tmp/netlog.json` to capture a Chrome netlog and `WT_DEBUG=1`
+for engine traces.
 
 ## Architecture
 
