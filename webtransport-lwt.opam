@@ -7,6 +7,8 @@ timers, and a Session/Stream API mirroring webtransport-eio."""
 maintainer: ["Ville Vesilehto <ville@vesilehto.fi>"]
 authors: ["Ville Vesilehto <ville@vesilehto.fi>"]
 license: "MIT"
+homepage: "https://github.com/thevilledev/ocaml-webtransport"
+bug-reports: "https://github.com/thevilledev/ocaml-webtransport/issues"
 depends: [
   "ocaml" {>= "5.2"}
   "dune" {>= "3.16"}
@@ -32,3 +34,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
+dev-repo: "git+https://github.com/thevilledev/ocaml-webtransport.git"

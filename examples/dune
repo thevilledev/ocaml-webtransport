@@ -1,0 +1,4 @@
+(executables
+ (names echo_server echo_client)
+ (libraries webtransport webtransport_eio webtransport_quiche wt_certs eio
+   eio_main ipaddr ptime))

@@ -673,7 +673,7 @@ module Wt = struct
   end
 
   module Stream = struct
-    type t = { s : session; id : int; dir : Engine.dir }
+    type t = { s : session; id : int }
 
     let id t = t.id
     let session t = t.s
@@ -735,6 +735,67 @@ module Wt = struct
     let stop_sending t ~code =
       Core_conn.command t.s.st (fun () ->
           Engine.stop_wt_stream t.s.eng ~id:t.id ~code)
+
+    (* Eio.Flow views, so WebTransport streams compose with the wider Eio
+       ecosystem (Buf_read, copy, ...). *)
+
+    let single_read t cs =
+      match
+        read t cs.Cstruct.buffer ~off:cs.Cstruct.off ~len:cs.Cstruct.len
+      with
+      | `Data n -> n
+      | `Fin -> raise End_of_file
+
+    let single_write t css =
+      List.fold_left
+        (fun acc cs ->
+          write t (Cstruct.to_string cs);
+          acc + Cstruct.length cs)
+        0 css
+
+    let shutdown t : Eio.Flow.shutdown_command -> unit = function
+      | `Send -> close_write t
+      | `Receive -> stop_sending t ~code:0
+      | `All ->
+          stop_sending t ~code:0;
+          close_write t
+
+    module Flow_two_way = struct
+      type nonrec t = t
+
+      let read_methods = []
+      let single_read = single_read
+      let single_write = single_write
+      let copy t ~src = Eio.Flow.Pi.simple_copy ~single_write t ~src
+      let shutdown = shutdown
+    end
+
+    module Flow_source = struct
+      type nonrec t = t
+
+      let read_methods = []
+      let single_read = single_read
+    end
+
+    module Flow_sink = struct
+      type nonrec t = t
+
+      let single_write = single_write
+      let copy t ~src = Eio.Flow.Pi.simple_copy ~single_write t ~src
+    end
+
+    let two_way_handler = Eio.Flow.Pi.two_way (module Flow_two_way)
+    let source_handler = Eio.Flow.Pi.source (module Flow_source)
+    let sink_handler = Eio.Flow.Pi.sink (module Flow_sink)
+
+    let to_flow t : Eio.Flow.two_way_ty Eio.Resource.t =
+      Eio.Resource.T (t, two_way_handler)
+
+    let to_source t : Eio.Flow.source_ty Eio.Resource.t =
+      Eio.Resource.T (t, source_handler)
+
+    let to_sink t : Eio.Flow.sink_ty Eio.Resource.t =
+      Eio.Resource.T (t, sink_handler)
   end
 
   let open_stream_blocking (s : session) ~dir =
@@ -751,21 +812,21 @@ module Wt = struct
               in
               raise (Session_closed (c, m)))
     in
-    { Stream.s; id; dir }
+    { Stream.s; id }
 
-  let accept_stream_blocking (s : session) q dir =
+  let accept_stream_blocking (s : session) q =
     Fiber.first
       (fun () ->
         let id = Eio.Stream.take q in
-        { Stream.s; id; dir })
+        { Stream.s; id })
       (fun () ->
         let code, message = Promise.await s.s_closed_p in
         raise (Session_closed (code, message)))
 
   let open_bidi s = open_stream_blocking s ~dir:`Bidi
   let open_uni s = open_stream_blocking s ~dir:`Uni
-  let accept_bidi s = accept_stream_blocking s s.bidi_q `Bidi
-  let accept_uni s = accept_stream_blocking s s.uni_q `Uni
+  let accept_bidi s = accept_stream_blocking s s.bidi_q
+  let accept_uni s = accept_stream_blocking s s.uni_q
 
   (* ---- endpoints ---- *)
 

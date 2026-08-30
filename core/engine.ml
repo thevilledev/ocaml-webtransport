@@ -128,7 +128,6 @@ type t = {
   scratch : Bigstringaf.t;
   mutable started : bool;  (* control stream opened, SETTINGS sent *)
   mutable peer_settings : Settings.t option;
-  mutable control_out : int option;
   mutable control_in : int option;
   mutable pending_connect :
     (string * string * string option * (string * string) list) option;
@@ -155,7 +154,6 @@ let create ?(wt_max_sessions = 1024) ?(fc = (0, 0, 0)) ?(parked_cap = 64)
     scratch = Bigstringaf.create 65_536;
     started = false;
     peer_settings = None;
-    control_out = None;
     control_in = None;
     pending_connect = None;
     conn_dead = false;
@@ -806,7 +804,6 @@ let start t =
     match B.open_stream h ~dir:`Uni with
     | Error _ -> debug (lazy "cannot open control stream yet")
     | Ok id ->
-        t.control_out <- Some id;
         let entries =
           match t.role with
           | `Server ->

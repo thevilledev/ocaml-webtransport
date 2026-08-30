@@ -3,6 +3,7 @@
 
 (generate_opam_files true)
 
+(source (github thevilledev/ocaml-webtransport))
 (authors "Ville Vesilehto <ville@vesilehto.fi>")
 (maintainers "Ville Vesilehto <ville@vesilehto.fi>")
 (license MIT)

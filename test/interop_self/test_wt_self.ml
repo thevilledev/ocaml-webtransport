@@ -131,6 +131,14 @@ let () =
   let incoming = Wt.accept_uni session in
   assert (Wt.Stream.read_all incoming = "uni-ping");
 
+  (* The same stream surface through the Eio.Flow view. *)
+  let bidi3 = Wt.open_bidi session in
+  let flow = Wt.Stream.to_flow bidi3 in
+  Eio.Flow.copy_string "flow-ping" flow;
+  Eio.Flow.shutdown flow `Send;
+  let br = Eio.Buf_read.of_flow ~max_size:1024 flow in
+  assert (Eio.Buf_read.take_all br = "flow-ping");
+
   Wt.Session.close ~code:0 session;
 
   (* Rejected session. *)

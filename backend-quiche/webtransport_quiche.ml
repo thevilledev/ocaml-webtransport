@@ -125,7 +125,25 @@ module Impl = struct
     | Ok n -> Ok n
     | Error e -> Error (Q.err_to_string e)
 
+  (* Opt-in qlog capture: set WT_QLOG_DIR to a directory and build libquiche
+     with the qlog feature (the Homebrew bottle has it compiled out, in which
+     case this silently does nothing). *)
+  let maybe_enable_qlog q role =
+    match Sys.getenv_opt "WT_QLOG_DIR" with
+    | None -> ()
+    | Some dir ->
+        let label = match role with `Client -> "client" | `Server -> "server" in
+        let path =
+          Filename.concat dir
+            (Printf.sprintf "wt-%s-%x%x.qlog" label (Random.bits ())
+               (Random.bits ()))
+        in
+        ignore
+          (Q.set_qlog_path q ~path ~title:("ocaml-webtransport " ^ label)
+             ~description:"ocaml-webtransport qlog")
+
   let mk role q =
+    maybe_enable_qlog q role;
     {
       q;
       role;

@@ -46,7 +46,8 @@ jobs:
       - name: Build quiche (Linux)
         if: runner.os == 'Linux'
         working-directory: .quiche-src
-        run: cargo build --release --features ffi,qlog,pkg-config-meta
+        # Package-scoped: the workspace's apps pull fontconfig and friends.
+        run: cargo build --release --package quiche --features ffi,qlog,pkg-config-meta
 
       - name: Export quiche pkg-config path (Linux)
         if: runner.os == 'Linux'

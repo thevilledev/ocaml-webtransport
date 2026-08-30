@@ -56,12 +56,10 @@ module Core = struct
     send_buf : Bigstringaf.t;
     sock : Lwt_unix.file_descr;
     mutable dead : bool;
-    mutable drain : unit -> unit;
     mutable fire_timeout : unit -> unit;
     mutable next_deadline : unit -> int64 option;
     mutable feed_pkt : Bigstringaf.t -> len:int -> from:(string * int) -> unit;
     mutable backend_closed : unit -> bool;
-    mutable pending_sends : (int * (string * int)) list;  (* len, dst *)
   }
 
   let mk ~sock =
@@ -74,12 +72,10 @@ module Core = struct
       send_buf = Bigstringaf.create 1500;
       sock;
       dead = false;
-      drain = (fun () -> ());
       fire_timeout = (fun () -> ());
       next_deadline = (fun () -> None);
       feed_pkt = (fun _ ~len:_ ~from:_ -> ());
       backend_closed = (fun () -> false);
-      pending_sends = [];
     }
 
   let install_backend (type c) (module B : Qb.S with type t = c) (h : c) st
@@ -95,11 +91,7 @@ module Core = struct
     st.feed_pkt <-
       (fun buf ~len ~from ->
         match B.recv h ~now:(now_ns ()) buf ~off:0 ~len ~from ~to_:local with
-        | Ok _ | Error _ -> ());
-    (* Packet emission: collect synchronously (backend is not reentrant
-       across yields mid-drain), then send asynchronously in [service]. *)
-    st.drain <- (fun () -> ());
-    ()
+        | Ok _ | Error _ -> ())
 
   (* Collects and sends every packet the backend has pending. *)
   let flush (type c) (module B : Qb.S with type t = c) (h : c) st =
