@@ -64,3 +64,9 @@ jobs:
 
       - name: Test
         run: opam exec -- dune runtest
+
+      # GitHub-hosted runners ship Google Chrome on both Linux and macOS.
+      - name: Chrome interop
+        env:
+          WT_CHROME: "1"
+        run: opam exec -- dune exec test/chrome/test_chrome.exe

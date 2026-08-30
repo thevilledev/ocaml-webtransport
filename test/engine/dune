@@ -1,0 +1,4 @@
+(test
+ (name test_engine)
+ (package webtransport)
+ (libraries webtransport wt_mock wt_qpack alcotest))

@@ -23,7 +23,7 @@ let echo_handler conn =
         while true do
           Raw.send_dgram conn (Raw.recv_dgram conn)
         done
-      with Raw.Connection_closed _ -> ());
+      with Webtransport_eio.Connection_closed _ -> ());
   try
     while true do
       let id = Raw.accept_stream conn in
@@ -32,9 +32,9 @@ let echo_handler conn =
             let data = read_all conn ~id in
             Raw.write conn ~id data;
             Raw.finish conn ~id
-          with Raw.Connection_closed _ -> ())
+          with Webtransport_eio.Connection_closed _ -> ())
     done
-  with Raw.Connection_closed _ -> ()
+  with Webtransport_eio.Connection_closed _ -> ()
 
 let () =
   Random.self_init ();
@@ -60,7 +60,7 @@ let () =
     let port = 20000 + Random.int 30000 in
     match
       Raw.listen ~sw ~net ~clock
-        ~backend:(Raw.Backend ((module B), scfg))
+        ~backend:(Webtransport_eio.Backend ((module B), scfg))
         ~port ~handler:echo_handler
     with
     | () -> port
@@ -69,7 +69,7 @@ let () =
   let port = bind_port 5 in
   let conn =
     Raw.connect ~sw ~net ~clock
-      ~backend:(Raw.Backend ((module B), ccfg))
+      ~backend:(Webtransport_eio.Backend ((module B), ccfg))
       ~server_name:"localhost"
       ~peer:("\127\000\000\001", port)
       ()

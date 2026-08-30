@@ -1,0 +1,5 @@
+(test
+ (name test_chrome)
+ (package webtransport-eio)
+ (libraries webtransport webtransport_eio webtransport_quiche wt_certs eio
+   eio_main))

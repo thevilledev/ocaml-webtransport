@@ -1,4 +1,4 @@
 (library
  (name webtransport)
  (public_name webtransport)
- (libraries bigstringaf))
+ (libraries bigstringaf wt_qpack))

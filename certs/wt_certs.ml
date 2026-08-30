@@ -84,6 +84,44 @@ let hash_hex t =
   String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) t.hash;
   Buffer.contents b
 
+let base64 s =
+  let tbl =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  in
+  let n = String.length s in
+  let out = Buffer.create (((n + 2) / 3) * 4) in
+  let i = ref 0 in
+  while !i + 2 < n do
+    let x =
+      (Char.code s.[!i] lsl 16)
+      lor (Char.code s.[!i + 1] lsl 8)
+      lor Char.code s.[!i + 2]
+    in
+    Buffer.add_char out tbl.[(x lsr 18) land 0x3f];
+    Buffer.add_char out tbl.[(x lsr 12) land 0x3f];
+    Buffer.add_char out tbl.[(x lsr 6) land 0x3f];
+    Buffer.add_char out tbl.[x land 0x3f];
+    i := !i + 3
+  done;
+  (match n - !i with
+  | 1 ->
+      let x = Char.code s.[!i] lsl 16 in
+      Buffer.add_char out tbl.[(x lsr 18) land 0x3f];
+      Buffer.add_char out tbl.[(x lsr 12) land 0x3f];
+      Buffer.add_string out "=="
+  | 2 ->
+      let x = (Char.code s.[!i] lsl 16) lor (Char.code s.[!i + 1] lsl 8) in
+      Buffer.add_char out tbl.[(x lsr 18) land 0x3f];
+      Buffer.add_char out tbl.[(x lsr 12) land 0x3f];
+      Buffer.add_char out tbl.[(x lsr 6) land 0x3f];
+      Buffer.add_char out '='
+  | _ -> ());
+  Buffer.contents out
+
+(* Base64 of the certificate hash: what a page feeds to
+   serverCertificateHashes after atob(). *)
+let hash_b64 t = base64 t.hash
+
 (* Writes cert/key PEMs to temp files (needed by TLS stacks that load from
    disk, e.g. quiche) and cleans them up afterwards. *)
 let with_temp_files t f =
