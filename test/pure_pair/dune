@@ -1,0 +1,6 @@
+(test
+ (name test_pure_pair)
+ (modules test_pure_pair)
+ (package webtransport-purequic)
+ (libraries webtransport_purequic webtransport wt_certs purequic
+   mirage-crypto-rng bigstringaf alcotest))

@@ -52,11 +52,20 @@ let handler session =
       loop ())
     (fun _ -> Lwt.return_unit)
 
+let () =
+  Printexc.register_printer (function
+    | Webtransport_lwt.Connection_closed { code; reason; remote; app } ->
+        Some
+          (Printf.sprintf
+             "Connection_closed { code = 0x%x; reason = %S; remote = %b; app = %b }"
+             code reason remote app)
+    | _ -> None)
+
 let main () =
   Random.self_init ();
   let certs = Wt_certs.generate () in
   Wt_certs.with_temp_files certs @@ fun ~cert_file ~key_file ->
-  let module B = Webtransport_quiche in
+  let module B = (val Wt_test_backend.select ()) in
   let get = function Ok v -> v | Error m -> failwith m in
   let scfg =
     get

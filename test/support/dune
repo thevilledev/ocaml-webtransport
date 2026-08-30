@@ -1,0 +1,3 @@
+(library
+ (name wt_test_backend)
+ (libraries webtransport webtransport_quiche webtransport_purequic))

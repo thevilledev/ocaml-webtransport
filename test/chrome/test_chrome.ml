@@ -152,7 +152,7 @@ let () =
       let proc = Eio.Stdenv.process_mgr env in
       let certs = Wt_certs.generate () in
       Wt_certs.with_temp_files certs @@ fun ~cert_file ~key_file ->
-      let module B = Webtransport_quiche in
+      let module B = (val Wt_test_backend.select ()) in
       let get = function Ok v -> v | Error m -> failwith m in
       let scfg =
         get

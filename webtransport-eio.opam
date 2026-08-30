@@ -14,7 +14,7 @@ depends: [
   "ocaml" {>= "5.2"}
   "dune" {>= "3.16"}
   "webtransport"
-  "webtransport-quiche"
+  "webtransport-quiche" {with-test}
   "eio" {>= "1.2"}
   "eio_main" {with-test}
   "mtime"

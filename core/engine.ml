@@ -628,6 +628,15 @@ let rec parse_stream t (r : rstream) =
                   | Ok s ->
                       t.peer_settings <- Some s;
                       debug (lazy "peer SETTINGS received");
+                      (* SETTINGS and CONNECT ride different streams, so a
+                         session can open before the peer's SETTINGS arrive
+                         (packet loss or reordering). Activate flow control
+                         retroactively for such sessions. *)
+                      Hashtbl.iter
+                        (fun _ sess ->
+                          if (not sess.fc_on) && sess.sstate = `Open then
+                            setup_fc t sess)
+                        t.sessions;
                       maybe_send_pending_connect t
                   | Error e ->
                       debug (lazy ("bad SETTINGS: " ^ e));

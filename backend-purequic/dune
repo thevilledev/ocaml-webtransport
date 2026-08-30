@@ -1,4 +1,5 @@
 (library
  (name webtransport_purequic)
  (public_name webtransport-purequic)
- (libraries purequic webtransport bigstringaf))
+ (libraries purequic purequic_tls webtransport bigstringaf x509 ca-certs
+   mirage-crypto-rng mirage-crypto-rng.unix ptime ptime.clock.os))

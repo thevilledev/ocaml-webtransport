@@ -1,5 +1,5 @@
 (test
  (name test_lwt_self)
  (package webtransport-lwt)
- (libraries webtransport webtransport_lwt webtransport_quiche wt_certs lwt
+ (libraries wt_test_backend webtransport webtransport_lwt webtransport_quiche wt_certs lwt
    lwt.unix bigstringaf))
