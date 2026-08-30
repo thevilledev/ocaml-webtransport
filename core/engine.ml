@@ -107,6 +107,8 @@ type wstream = {
   mutable wfin : bool;  (* fin requested after wout drains *)
   mutable wfin_sent : bool;
   mutable wsid : int option;  (* owning WT session, for data accounting *)
+  mutable wsent : int;  (* bytes the backend has accepted so far *)
+  mutable wprefix : int;  (* WT signal prefix length we wrote; 0 = none *)
 }
 
 type role = [ `Client | `Server ]
@@ -185,6 +187,8 @@ let wstream t id =
           wfin = false;
           wfin_sent = false;
           wsid;
+          wsent = 0;
+          wprefix = 0;
         }
       in
       Hashtbl.add t.wstreams id w;
@@ -217,6 +221,7 @@ let try_flush_wstream t w =
         match B.stream_send h ~id:w.wid t.scratch ~off:0 ~len:chunk ~fin with
         | Ok written ->
             Bytebuf.advance w.wout written;
+            w.wsent <- w.wsent + written;
             (match fc_session () with
             | Some s -> s.sent_data <- s.sent_data + written
             | None -> ());
@@ -270,9 +275,23 @@ let mk_frames ~request =
       headers_acc = Buffer.create 256;
     }
 
+(* draft-ietf-webtrans-http3-16 s4.5: a WT data stream we opened resets via
+   RESET_STREAM_AT with the signal prefix (stream type + session id) kept
+   deliverable, so the peer can still associate the stream with its session.
+   The reliable size is clamped to what the backend accepted — claiming more
+   than the final size is a protocol violation — and backends without
+   reliable reset degrade to a plain reset. *)
+let reset_send_side t ~id ~code =
+  let (C ((module B), h)) = t.bc in
+  match Hashtbl.find_opt t.wstreams id with
+  | Some w when w.wprefix > 0 ->
+      ignore
+        (B.stream_reset_at h ~id ~code ~reliable_size:(min w.wprefix w.wsent))
+  | _ -> ignore (B.stream_reset h ~id ~code)
+
 let reset_stream t ~id ~h3_code =
   let (C ((module B), h)) = t.bc in
-  ignore (B.stream_reset h ~id ~code:h3_code);
+  reset_send_side t ~id ~code:h3_code;
   ignore (B.stream_stop_sending h ~id ~code:h3_code)
 
 (* ---- session lifecycle ---- *)
@@ -1024,7 +1043,9 @@ let open_wt_stream t ~sid ~dir =
               | `Uni -> Wire.Uni_stream.wt);
             Varint.add_buffer b sid;
             write t ~id (Buffer.contents b);
-            (wstream t id).wsid <- Some sid;
+            let w = wstream t id in
+            w.wsid <- Some sid;
+            w.wprefix <- Buffer.length b;
             (match dir with
             | `Bidi ->
                 (* Track for reads: the peer answers on the same stream. *)
@@ -1054,13 +1075,12 @@ let outbuf_len t ~id =
 (* Abrupt stream termination with WebTransport application error codes
    (mapped into the reserved HTTP/3 range on the wire). *)
 let reset_wt_stream t ~id ~code =
-  let (C ((module B), h)) = t.bc in
   (match Hashtbl.find_opt t.wstreams id with
   | Some w ->
       ignore (Bytebuf.take_all w.wout);
       w.wfin_sent <- true
   | None -> ());
-  ignore (B.stream_reset h ~id ~code:(Wt_error.to_h3 code))
+  reset_send_side t ~id ~code:(Wt_error.to_h3 code)
 
 let stop_wt_stream t ~id ~code =
   let (C ((module B), h)) = t.bc in

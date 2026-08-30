@@ -37,7 +37,8 @@ module Impl = struct
     events : event Queue.t;
     dgrams_in : string Queue.t;
     dgrams_out : string Queue.t;
-    resets : (int, int) Hashtbl.t;  (* our RESET_STREAM: id -> code *)
+    (* our RESET_STREAM(_AT): id -> code * reliable_size (None = plain) *)
+    resets : (int, int * int option) Hashtbl.t;
     stops : (int, int) Hashtbl.t;  (* our STOP_SENDING: id -> code *)
     mutable established : bool;
     mutable closed : bool;
@@ -168,13 +169,16 @@ module Impl = struct
     Ok ()
 
   let stream_reset t ~id ~code =
-    Hashtbl.replace t.resets id code;
+    Hashtbl.replace t.resets id (code, None);
     Ok ()
 
   let supports_reset_at _ = false
 
-  (* the mock records the degrade the same way a plain reset is recorded *)
-  let stream_reset_at t ~id ~code ~reliable_size:_ = stream_reset t ~id ~code
+  (* degrades like quiche on the wire, but records the requested reliable
+     size so tests can assert what the engine asked for *)
+  let stream_reset_at t ~id ~code ~reliable_size =
+    Hashtbl.replace t.resets id (code, Some reliable_size);
+    Ok ()
 
   let stream_stop_sending t ~id ~code =
     Hashtbl.replace t.stops id code;
@@ -218,7 +222,11 @@ module Impl = struct
 
   let sent t ~id = Buffer.contents (stream t id).sdata
   let sent_fin t ~id = (stream t id).sfin
-  let reset_code t ~id = Hashtbl.find_opt t.resets id
+  let reset_code t ~id = Option.map fst (Hashtbl.find_opt t.resets id)
+
+  (* [Some n] when the engine reset [id] via [stream_reset_at]. *)
+  let reset_reliable t ~id =
+    Option.bind (Hashtbl.find_opt t.resets id) (fun (_, r) -> r)
   let stop_code t ~id = Hashtbl.find_opt t.stops id
   let sent_dgrams t = List.of_seq (Queue.to_seq t.dgrams_out)
   let block_sends t ~id v = (stream t id).send_blocked <- v

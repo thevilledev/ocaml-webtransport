@@ -431,6 +431,65 @@ let test_split_delivery () =
   | [ E.Incoming_session { sid = 0; _ } ] -> ()
   | _ -> Alcotest.fail "split delivery failed"
 
+(* draft-ietf-webtrans-http3-16 s4.5: resetting a WT data stream we opened
+   must keep the signal prefix deliverable (RESET_STREAM_AT) so the peer can
+   still associate the stream with its session. *)
+
+let open_ws eng dir =
+  match E.open_wt_stream eng ~sid:0 ~dir with
+  | Ok id -> id
+  | _ -> Alcotest.fail "open_wt_stream"
+
+let test_reset_wt_stream_reliable () =
+  let m, eng = test_server_accept () in
+  let uni = open_ws eng `Uni and bidi = open_ws eng `Bidi in
+  (* Signal prefixes as written: 2-byte type varint + 1-byte sid varint. *)
+  Alcotest.(check string) "uni prefix"
+    (vstr Wire.Uni_stream.wt ^ vstr 0) (M.sent m ~id:uni);
+  Alcotest.(check string) "bidi prefix"
+    (vstr Wire.Frame.wt_stream ^ vstr 0) (M.sent m ~id:bidi);
+  E.write_stream eng ~id:uni "app bytes beyond the prefix";
+  E.reset_wt_stream eng ~id:uni ~code:7;
+  E.reset_wt_stream eng ~id:bidi ~code:8;
+  Alcotest.(check (option int)) "uni code"
+    (Some (Webtransport.Wt_error.to_h3 7)) (M.reset_code m ~id:uni);
+  Alcotest.(check (option int)) "uni reliable = prefix" (Some 3)
+    (M.reset_reliable m ~id:uni);
+  Alcotest.(check (option int)) "bidi reliable = prefix" (Some 3)
+    (M.reset_reliable m ~id:bidi)
+
+let test_teardown_reset_reliable () =
+  let m, eng = test_server_accept () in
+  let uni = open_ws eng `Uni in
+  (* Peer opens a WT bidi stream toward us: our send side has no prefix. *)
+  M.peer_open m ~id:4 ~dir:`Bidi;
+  M.peer_data m ~id:4 (vstr Wire.Frame.wt_stream ^ vstr 0 ^ "hi");
+  ignore (proc eng);
+  (* Session close tears down both data streams. *)
+  M.peer_data m ~id:0 (frame Wire.Frame.data (Capsule.encode_close ~code:1 ~message:""));
+  ignore (proc eng);
+  Alcotest.(check (option int)) "our stream: session-gone code"
+    (Some Webtransport.Wt_error.wt_session_gone) (M.reset_code m ~id:uni);
+  Alcotest.(check (option int)) "our stream: reliable = prefix" (Some 3)
+    (M.reset_reliable m ~id:uni);
+  Alcotest.(check (option int)) "peer stream: session-gone code"
+    (Some Webtransport.Wt_error.wt_session_gone) (M.reset_code m ~id:4);
+  Alcotest.(check (option int)) "peer stream: plain reset" None
+    (M.reset_reliable m ~id:4)
+
+let test_reset_reliable_clamped () =
+  let m, eng = test_server_accept () in
+  (* Next server uni id is 7 (the control stream took 3): block its sends
+     before opening so the prefix stays buffered inside the engine. *)
+  M.block_sends m ~id:7 true;
+  let id = open_ws eng `Uni in
+  Alcotest.(check int) "expected id" 7 id;
+  Alcotest.(check string) "prefix still buffered" "" (M.sent m ~id);
+  E.reset_wt_stream eng ~id ~code:0;
+  (* Nothing reached the backend: the reliable size must not exceed it. *)
+  Alcotest.(check (option int)) "clamped to flushed bytes" (Some 0)
+    (M.reset_reliable m ~id)
+
 let () =
   Alcotest.run "engine"
     [
@@ -461,5 +520,14 @@ let () =
         [
           Alcotest.test_case "connect flow" `Quick test_client_flow;
           Alcotest.test_case "rejected" `Quick test_client_rejected;
+        ] );
+      ( "reliable-reset",
+        [
+          Alcotest.test_case "app reset keeps prefix" `Quick
+            test_reset_wt_stream_reliable;
+          Alcotest.test_case "teardown resets keep prefix" `Quick
+            test_teardown_reset_reliable;
+          Alcotest.test_case "reliable size clamped to flushed" `Quick
+            test_reset_reliable_clamped;
         ] );
     ]
