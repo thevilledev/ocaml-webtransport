@@ -106,7 +106,6 @@ type t = {
   mutable established : bool;
   mutable hs_confirmed : bool;
   mutable handshake_event_sent : bool;
-  mutable alpn : string option;
   mutable peer_params : Tparams.t option;
   mutable peer_ack_delay_exp : int;
   (* streams *)
@@ -158,7 +157,6 @@ type t = {
   mutable tx_phase : bool;
   mutable rx_phase : bool;
   mutable prev_rx_keys : Aead.keys option;
-  mutable tls_flushed : bool;
   (* 1-RTT datagrams that arrived before the application keys (typically
      coalesced with the peer's final handshake flight); replayed once the
      keys install (RFC 9001 s.5.7). *)
@@ -238,8 +236,8 @@ let suite_of_cipher c = Option.get (Qsuite.of_tls_id (Cipher.to_id c))
 let apply_peer_params t ~now params =
   t.peer_params <- Some params;
   t.peer_ack_delay_exp <- params.Tparams.ack_delay_exponent;
-  t.recovery.Recovery.max_ack_delay_ns <-
-    Int64.mul (Int64.of_int params.Tparams.max_ack_delay_ms) 1_000_000L;
+  Recovery.set_max_ack_delay_ns t.recovery
+    (Int64.mul (Int64.of_int params.Tparams.max_ack_delay_ms) 1_000_000L);
   t.peer_max_data <- params.Tparams.initial_max_data;
   t.peer_max_streams_bidi <- params.Tparams.initial_max_streams_bidi;
   t.peer_max_streams_uni <- params.Tparams.initial_max_streams_uni;
@@ -278,7 +276,6 @@ let rec drain_tls t ~now =
               protocol_close t ~now ~code:0x08 ~reason:("bad tparams: " ^ e))
       | Tls.Handshake_complete { alpn } ->
           t.established <- true;
-          t.alpn <- Some alpn;
           if t.cfg.role = `Server then begin
             (* server: handshake confirmed on completion *)
             t.hs_confirmed <- true;
@@ -332,7 +329,6 @@ let create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params ~now =
           established = false;
           hs_confirmed = false;
           handshake_event_sent = false;
-          alpn = None;
           peer_params = None;
           peer_ack_delay_exp = 3;
           streams = Hashtbl.create 16;
@@ -376,7 +372,6 @@ let create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params ~now =
           tx_phase = false;
           rx_phase = false;
           prev_rx_keys = None;
-          tls_flushed = false;
           early_app_stash = [];
           replaying = false;
         }
@@ -397,16 +392,6 @@ let client cfg ~server_name ~scid ~dcid ~peer ~now =
         Tls.start t.tls;
         drain_tls t ~now;
         Ok t
-
-let server cfg ~scid ~peer ~now =
-  if cfg.role <> `Server then Error "config role is not `Server"
-  else
-    (* initial keys + odcid come from the first packet; transport params
-       need the odcid, so TLS creation is deferred to first recv — instead
-       we cheat: the adapter calls [server_first_dcid] before feeding. *)
-    Error
-      (ignore (cfg, scid, peer, now);
-       "use server_with_odcid")
 
 let server_with_odcid cfg ~scid ~odcid ~peer ~now =
   if cfg.role <> `Server then Error "config role is not `Server"
@@ -788,12 +773,6 @@ let handle_frame t sp ~now (f : Frame.t) =
 
 let discard_initial t =
   let sp = sp_initial t in
-  sp.tx_keys <- None;
-  sp.rx_keys <- None;
-  Recovery.discard_space t.recovery sp.rec_space
-
-let discard_handshake t =
-  let sp = sp_handshake t in
   sp.tx_keys <- None;
   sp.rx_keys <- None;
   Recovery.discard_space t.recovery sp.rec_space

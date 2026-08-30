@@ -65,6 +65,8 @@ let create () =
     max_ack_delay_ns = 25_000_000L;
   }
 
+let set_max_ack_delay_ns t v = t.max_ack_delay_ns <- v
+
 let ( +^ ) = Int64.add
 let ( -^ ) = Int64.sub
 
