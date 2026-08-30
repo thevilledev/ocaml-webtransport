@@ -76,9 +76,13 @@ jobs:
         run: cargo build --release --package quiche --features ffi,qlog,pkg-config-meta
 
       - name: Export quiche pkg-config path
+        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+
+      - name: Install libquiche into the system loader path
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+          sudo install -m 0644 .quiche-src/target/release/libquiche.so /usr/local/lib/
+          sudo ldconfig
+          ldconfig -p | grep quiche
 
       - uses: ocaml/setup-ocaml@v3
         with:
@@ -142,9 +146,13 @@ jobs:
         run: cargo build --release --package quiche --features ffi,qlog,pkg-config-meta
 
       - name: Export quiche pkg-config path
+        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+
+      - name: Install libquiche into the system loader path
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+          sudo install -m 0644 .quiche-src/target/release/libquiche.so /usr/local/lib/
+          sudo ldconfig
+          ldconfig -p | grep quiche
 
       - uses: actions/setup-go@v5
         with:
