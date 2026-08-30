@@ -86,7 +86,9 @@ jobs:
 
       - name: Export quiche pkg-config path (Linux)
         if: runner.os == 'Linux'
-        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
 
       - uses: ocaml/setup-ocaml@v3
         with:
@@ -150,7 +152,9 @@ jobs:
         run: cargo build --release --package quiche --features ffi,qlog,pkg-config-meta
 
       - name: Export quiche pkg-config path
-        run: echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.quiche-src/target/release" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v5
         with:
