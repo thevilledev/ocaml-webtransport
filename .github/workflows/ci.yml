@@ -4,14 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   schedule:
     # Monthly run against current Chrome stable to catch browser drift.
     - cron: "17 6 3 * *"
+    # Weekly randomized fuzz soak (the `soak` job below).
+    - cron: "43 4 * * 1"
 
 jobs:
   # The pure-OCaml backend: no Rust toolchain, no libquiche, no brew.
   # This is the install experience opam users of webtransport-purequic get.
   pure:
+    if: github.event.schedule != '43 4 * * 1'
     strategy:
       fail-fast: false
       matrix:
@@ -41,9 +45,47 @@ jobs:
           @test/purequic/runtest @test/pure_pair/runtest @test/unit/runtest
           @test/engine/runtest @test/qpack/runtest @test/fuzz/runtest
 
+  # Randomized crowbar soak: ~10 minutes per fuzz binary with fresh
+  # seeds and a high repeat count, on the weekly cron or on demand.
+  # Push/PR runs already exercise the same targets deterministically.
+  soak:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '43 4 * * 1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+
+      - name: Install dependencies (quiche-free)
+        run: opam install ./purequic.opam ./webtransport.opam ./webtransport-purequic.opam --deps-only --with-test
+
+      - name: Build fuzz binaries
+        run: >
+          opam exec -- dune build
+          --only-packages purequic,webtransport,webtransport-purequic
+          test/purequic/fuzz_purequic.exe test/fuzz/test_fuzz.exe
+
+      - name: Soak
+        run: |
+          soak_one () {
+            local exe="$1" deadline=$(( $(date +%s) + 600 ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              seed=$(( $(date +%s%N) % 4611686018427387903 ))
+              echo "== $exe seed=$seed"
+              "$exe" -s "$seed" -r 20000 > /dev/null || {
+                echo "FAILED with seed $seed"; "$exe" -s "$seed" -r 20000; exit 1; }
+            done
+          }
+          soak_one _build/default/test/purequic/fuzz_purequic.exe
+          soak_one _build/default/test/fuzz/test_fuzz.exe
+
   # The full matrix: quiche + pure side by side, cross-implementation
   # tests, and the Chrome suite against both backends.
   full:
+    if: github.event.schedule != '43 4 * * 1'
     strategy:
       fail-fast: false
       matrix:
@@ -117,9 +159,21 @@ jobs:
           WT_BACKEND: pure
         run: opam exec -- dune exec test/chrome/test_chrome.exe
 
+      - name: Firefox interop (quiche backend)
+        env:
+          WT_FIREFOX: "1"
+        run: opam exec -- dune exec test/chrome/test_chrome.exe
+
+      - name: Firefox interop (pure backend)
+        env:
+          WT_FIREFOX: "1"
+          WT_BACKEND: pure
+        run: opam exec -- dune exec test/chrome/test_chrome.exe
+
   # webtransport-go, both directions: v0.9 for both backends, and v0.13
   # (which hard-requires RESET_STREAM_AT) for the pure backend.
   go-interop:
+    if: github.event.schedule != '43 4 * * 1'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

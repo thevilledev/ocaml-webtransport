@@ -2,4 +2,4 @@
  (names test_purequic fuzz_purequic test_tls)
  (package purequic)
  (libraries purequic purequic_tls alcotest crowbar bigstringaf x509
-   mirage-crypto-rng ptime))
+   mirage-crypto-rng mirage-crypto-ec ptime))

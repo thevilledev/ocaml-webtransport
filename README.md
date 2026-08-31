@@ -95,7 +95,11 @@ dune runtest
 Opt-in interop suites:
 
 - `WT_CHROME=1 dune exec test/chrome/test_chrome.exe` — headless Chrome
-  runs session/streams/datagrams/close against the server.
+  runs session/streams/datagrams/close against the server;
+  `WT_FIREFOX=1` runs the same suite in headless Firefox. (Safari also
+  supports `serverCertificateHashes` since early 2026 and the server
+  already sends the `WT_MAX_SESSIONS` setting it requires, but Safari
+  has no headless mode, so it is not part of CI.)
 - `WT_GO=1 dune exec test/interop_go/test_go_interop.exe` — both directions
   against quic-go/webtransport-go v0.9 (the newest release the quiche
   backend can speak: v0.10+ hard-requires RESET_STREAM_AT, which libquiche
@@ -104,7 +108,23 @@ Opt-in interop suites:
   negotiates RESET_STREAM_AT with the purequic engine.
 - `WT_QLOG_DIR=/tmp dune exec ...` — per-connection qlog traces (needs a
   libquiche built with the qlog feature; the Homebrew bottle omits it).
-- `WT_DEBUG=1` — engine event traces on stderr.
+  The purequic backend emits its own qlog (JSON-SEQ) with no extra
+  dependencies.
+- `WT_DEBUG=1` — engine event traces on stderr; `WT_PURE_DEBUG=1` —
+  purequic datagram/frame/stream traces.
+
+Fuzzing: every crowbar target runs deterministically under
+`dune runtest`, a randomized ~20-minute soak runs weekly in CI (or on
+demand via workflow dispatch), and the same binaries are
+coverage-guided fuzzers under AFL:
+
+```
+opam install ocaml-option-afl   # in a dedicated switch
+dune build test/purequic/fuzz_purequic.exe
+mkdir -p /tmp/afl-in && echo seed > /tmp/afl-in/seed
+afl-fuzz -i /tmp/afl-in -o /tmp/afl-out -- \
+  ./_build/default/test/purequic/fuzz_purequic.exe @@
+```
 
 ## License
 

@@ -317,6 +317,137 @@ let test_truncated_fails_closed () =
   T.handle server ~level:T.Initial "\x01\xff\xff\xff";
   Alcotest.(check bool) "server survives" true (T.next_event server = None)
 
+(* ---- adversarial negatives: hand-built hostile peers ---- *)
+
+module W = Purequic_tls.Tls_wire
+
+(* start a client and capture its ClientHello *)
+let client_with_ch () =
+  reseed_rng ();
+  let c =
+    T.create
+      (Result.get_ok
+         (T.client_config ~server_name:"localhost" ~alpn:[ "h3" ]
+            ~transport_params:"C" ~rng:(mk_rng 5) ()))
+  in
+  T.start c;
+  (match T.next_event c with
+  | Some (T.Send { level = T.Initial; _ }) -> ()
+  | _ -> Alcotest.fail "no CH");
+  c
+
+let expect_fatal c ~level msg alerts =
+  T.handle c ~level msg;
+  let rec find () =
+    match T.next_event c with
+    | Some (T.Fatal { alert; _ }) ->
+        if List.mem alert alerts then ()
+        else Alcotest.failf "wrong alert %d (wanted %s)" alert
+            (String.concat "/" (List.map string_of_int alerts))
+    | Some _ -> find ()
+    | None -> Alcotest.fail "expected a fatal alert"
+  in
+  find ()
+
+let sh ~suite ~exts =
+  W.build_server_hello ~random:(String.make 32 'r') ~session_id:""
+    ~cipher_suite:suite ~extensions:exts
+
+let test_invalid_p256_point () =
+  let c = client_with_ch () in
+  (* server "selects" our P-256 share but returns a garbage point *)
+  let bogus = "\x04" ^ String.make 64 '\x42' in
+  expect_fatal c ~level:T.Initial
+    (sh ~suite:0x1301
+       ~exts:
+         [
+           W.supported_versions_server_ext ();
+           W.key_share_server_ext ~group:W.group_secp256r1 ~key:bogus;
+         ])
+    [ 47 ]
+
+let test_low_order_x25519 () =
+  let c = client_with_ch () in
+  (* the all-zero point is small-order; the exchange must be rejected *)
+  expect_fatal c ~level:T.Initial
+    (sh ~suite:0x1301
+       ~exts:
+         [
+           W.supported_versions_server_ext ();
+           W.key_share_server_ext ~group:W.group_x25519
+             ~key:(String.make 32 '\x00');
+         ])
+    [ 47 ]
+
+let test_session_id_echo_mismatch () =
+  let c = client_with_ch () in
+  let bad =
+    W.build_server_hello ~random:(String.make 32 'r') ~session_id:"bogus"
+      ~cipher_suite:0x1301
+      ~extensions:[ W.supported_versions_server_ext () ]
+  in
+  expect_fatal c ~level:T.Initial bad [ 47 ]
+
+let test_unknown_suite_selected () =
+  let c = client_with_ch () in
+  expect_fatal c ~level:T.Initial
+    (sh ~suite:0x0a0a (* GREASE *)
+       ~exts:[ W.supported_versions_server_ext () ])
+    [ 47 ]
+
+let server_for_negatives () =
+  let cert, key = test_cert () in
+  reseed_rng ();
+  T.create
+    (Result.get_ok
+       (T.server_config ~cert_chain:[ cert ] ~priv_key:key ~alpn:[ "h3" ]
+          ~transport_params:"S" ~rng:(mk_rng 6) ()))
+
+let build_ch ~suites ~exts =
+  W.build_client_hello ~random:(String.make 32 'c') ~session_id:""
+    ~cipher_suites:suites ~extensions:exts
+
+let base_ch_exts ~with_share () =
+  let share =
+    if with_share then begin
+      let _, pub = Mirage_crypto_ec.X25519.gen_key () in
+      [ W.key_share_client_ext [ W.key_share_entry ~group:W.group_x25519 ~key:pub ] ]
+    end
+    else []
+  in
+  [
+    W.supported_groups_ext [ W.group_x25519 ];
+    W.alpn_ext [ "h3" ];
+    W.signature_algorithms_ext [ 0x0403 ];
+    W.supported_versions_client_ext ();
+  ]
+  @ share
+  @ [ W.quic_transport_parameters_ext "tp" ]
+
+let test_grease_only_suites () =
+  let s = server_for_negatives () in
+  expect_fatal s ~level:T.Initial
+    (build_ch ~suites:[ 0x0a0a; 0x1a1a ] ~exts:(base_ch_exts ~with_share:true ()))
+    [ 40 ]
+
+let test_missing_key_share () =
+  let s = server_for_negatives () in
+  expect_fatal s ~level:T.Initial
+    (build_ch ~suites:[ 0x1301 ] ~exts:(base_ch_exts ~with_share:false ()))
+    [ 40; 50; 109 ]
+
+let test_bad_signature_scheme_rejected () =
+  (* rsa_pkcs1_sha1 must never verify a CertificateVerify *)
+  let cert, _ = test_cert () in
+  match
+    Purequic_tls.Cert_verify.verify ~cert ~scheme:0x0201
+      ~signature:(String.make 64 '\x00')
+      ~context:Purequic_tls.Cert_verify.server_context
+      ~transcript_hash:(String.make 32 '\x00')
+  with
+  | Error _ -> ()
+  | Ok () -> Alcotest.fail "sha1 scheme accepted"
+
 let () =
   Alcotest.run "purequic_tls"
     [
@@ -332,5 +463,15 @@ let () =
           ("alpn mismatch", `Quick, test_alpn_mismatch);
           ("bad certificate_verify", `Quick, test_bad_cert_verify);
           ("truncated input fails closed", `Quick, test_truncated_fails_closed);
+        ] );
+      ( "negatives",
+        [
+          ("invalid P-256 point", `Quick, test_invalid_p256_point);
+          ("low-order x25519 point", `Quick, test_low_order_x25519);
+          ("session_id echo mismatch", `Quick, test_session_id_echo_mismatch);
+          ("unknown suite selected", `Quick, test_unknown_suite_selected);
+          ("GREASE-only cipher suites", `Quick, test_grease_only_suites);
+          ("missing key_share", `Quick, test_missing_key_share);
+          ("sha1 signature scheme rejected", `Quick, test_bad_signature_scheme_rejected);
         ] );
     ]

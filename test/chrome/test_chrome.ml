@@ -138,11 +138,47 @@ let chrome_bin () =
       | Some c -> c
       | None -> "google-chrome")
 
-let () =
-  match Sys.getenv_opt "WT_CHROME" with
+let firefox_bin () =
+  match Sys.getenv_opt "FIREFOX_BIN" with
+  | Some c -> c
   | None ->
-      print_endline "chrome interop: skipped (set WT_CHROME=1 to run)"
-  | Some _ ->
+      let candidates =
+        [
+          "/Applications/Firefox.app/Contents/MacOS/firefox";
+          "/usr/bin/firefox";
+          "/snap/bin/firefox";
+          "/usr/lib/firefox/firefox";
+        ]
+      in
+      (match List.find_opt Sys.file_exists candidates with
+      | Some c -> c
+      | None -> "firefox")
+
+(* Firefox reads prefs from user.js in the profile directory. WebTransport
+   and its datagrams default to enabled in current releases; setting them
+   explicitly keeps the harness stable across channels. *)
+let write_firefox_prefs profile =
+  let oc = open_out (Filename.concat profile "user.js") in
+  output_string oc
+    {|user_pref("network.webtransport.enabled", true);
+user_pref("network.webtransport.datagrams.enabled", true);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+|};
+  close_out oc
+
+let () =
+  let browser =
+    if Sys.getenv_opt "WT_CHROME" <> None then Some `Chrome
+    else if Sys.getenv_opt "WT_FIREFOX" <> None then Some `Firefox
+    else None
+  in
+  match browser with
+  | None ->
+      print_endline
+        "browser interop: skipped (set WT_CHROME=1 or WT_FIREFOX=1 to run)"
+  | Some browser ->
       Random.self_init ();
       Eio_main.run @@ fun env ->
       Switch.run @@ fun sw ->
@@ -271,30 +307,46 @@ let () =
             loop ()
           in
           loop ());
-      (* Launch headless Chrome. *)
+      (* Launch the headless browser. *)
       let url = Printf.sprintf "http://127.0.0.1:%d/" http_port in
-      let profile = Filename.temp_dir "wt-chrome" "" in
-      let bin = chrome_bin () in
-      Printf.printf "launching %s -> %s (wt port %d)\n%!" bin url wt_port;
-      let netlog_args =
-        match Sys.getenv_opt "WT_NETLOG" with
-        | Some path -> [ "--log-net-log=" ^ path; "--net-log-capture-mode=Everything" ]
-        | None -> []
+      let profile = Filename.temp_dir "wt-browser" "" in
+      let label, argv =
+        match browser with
+        | `Chrome ->
+            let netlog_args =
+              match Sys.getenv_opt "WT_NETLOG" with
+              | Some path ->
+                  [ "--log-net-log=" ^ path; "--net-log-capture-mode=Everything" ]
+              | None -> []
+            in
+            ( "chrome",
+              [
+                chrome_bin ();
+                "--headless=new";
+                "--user-data-dir=" ^ profile;
+                "--no-first-run";
+                "--no-default-browser-check";
+                "--disable-gpu";
+                "--enable-logging=stderr";
+              ]
+              @ netlog_args @ [ url ] )
+        | `Firefox ->
+            write_firefox_prefs profile;
+            ( "firefox",
+              [
+                firefox_bin ();
+                "--headless";
+                "--no-remote";
+                "--new-instance";
+                "--profile";
+                profile;
+                url;
+              ] )
       in
+      Printf.printf "launching %s -> %s (wt port %d)\n%!" (List.hd argv) url
+        wt_port;
       Fiber.fork_daemon ~sw (fun () ->
-          (try
-             Eio.Process.run proc
-               ([
-                  bin;
-                  "--headless=new";
-                  "--user-data-dir=" ^ profile;
-                  "--no-first-run";
-                  "--no-default-browser-check";
-                  "--disable-gpu";
-                  "--enable-logging=stderr";
-                ]
-               @ netlog_args @ [ url ])
-           with _ -> ());
+          (try Eio.Process.run proc argv with _ -> ());
           `Stop_daemon);
       (* Wait for the verdict. *)
       let result =
@@ -302,9 +354,9 @@ let () =
             Ok (Promise.await verdict_p))
       in
       (match result with
-      | Error `Timeout -> failwith "chrome interop: timed out waiting for page verdict"
+      | Error `Timeout -> failwith (label ^ " interop: timed out waiting for page verdict")
       | Ok page_pass ->
-          if not page_pass then failwith "chrome interop: page reported FAIL";
+          if not page_pass then failwith (label ^ " interop: page reported FAIL");
           (* Give the close capsule a moment to be observed server-side. *)
           let rec wait_close tries =
             match !close_seen with
@@ -321,4 +373,4 @@ let () =
               Printf.printf "server observed close: code=%d msg=%S\n" code msg;
               if code <> 42 then failwith "expected close code 42"
           | None -> failwith "server never observed session close");
-          print_endline "chrome interop: PASS")
+          Printf.printf "%s interop: PASS\n" label)

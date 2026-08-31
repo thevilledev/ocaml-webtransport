@@ -11,7 +11,12 @@
    validated and discarded; TLS KeyUpdate is fatal (RFC 9001 s.8.4 — key
    update happens at the QUIC layer). Alerts are surfaced as [Fatal]
    events for the QUIC layer to map onto 0x0100+alert connection closes;
-   alerts are never received (peers close at the QUIC layer). *)
+   alerts are never received (peers close at the QUIC layer).
+
+   Timing: Finished MACs are compared with eqaf (as is the Retry
+   integrity tag in the QUIC layer); AEAD tag comparison is inside
+   mirage-crypto. The remaining String.equal sites compare public
+   values (HRR sentinel, session-id echo, certificate context). *)
 
 module W = Tls_wire
 
