@@ -159,6 +159,12 @@ val app_close : t -> now:int64 -> app:bool -> code:int -> reason:string -> unit
 (** start the closing handshake (CONNECTION_CLOSE); keep pumping [send]
     and timers until [is_closed]. *)
 
+val set_trace : t -> (string -> unit) -> unit
+(** install a qlog sink: called once per event with the JSON event body
+    (packet_sent / packet_received / packet_dropped / metrics_updated);
+    framing (JSON-SEQ record separators, the file header) is the sink's
+    concern. *)
+
 module For_testing : sig
   val initiate_key_update : t -> unit
   (** spontaneously step the send keys to the next generation. *)

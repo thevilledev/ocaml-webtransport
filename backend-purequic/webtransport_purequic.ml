@@ -152,13 +152,43 @@ module Impl = struct
   let negotiate_version ~scid ~dcid buf =
     Purequic.Packet.write_vneg buf ~client_dcid:dcid ~client_scid:scid
 
+  (* Opt-in qlog capture (JSON-SEQ, qvis-loadable): set WT_QLOG_DIR to a
+     directory. Unlike the quiche adapter this needs no special library
+     build — the engine emits events natively. *)
+  let maybe_enable_qlog conn role =
+    match Sys.getenv_opt "WT_QLOG_DIR" with
+    | None -> ()
+    | Some dir -> (
+        let label = match role with `Client -> "client" | `Server -> "server" in
+        try
+          let path =
+            Filename.concat dir
+              (Printf.sprintf "wt-pure-%s-%x%x.qlog" label (Random.bits ())
+                 (Random.bits ()))
+          in
+          let oc = open_out path in
+          let rs = "\x1e" in
+          output_string oc
+            (rs
+            ^ Printf.sprintf
+                {|{"qlog_version":"0.3","qlog_format":"JSON-SEQ","title":"webtransport-purequic %s","trace":{"vantage_point":{"type":"%s"}}}|}
+                label label
+            ^ "\n");
+          flush oc;
+          Conn.set_trace conn (fun ev ->
+              output_string oc (rs ^ ev ^ "\n");
+              flush oc)
+        with Sys_error _ -> ())
+
   let connect cfg ~server_name ~scid ~peer ~local:_ ~now =
     if cfg.Conn.role <> `Client then Error "connect with a server config"
     else begin
       Lazy.force ensure_rng;
       let dcid = Mirage_crypto_rng.generate 16 in
       match Conn.client cfg ~server_name ~scid ~dcid ~peer ~now with
-      | Ok conn -> Ok { st = Live { conn; now } }
+      | Ok conn ->
+          maybe_enable_qlog conn `Client;
+          Ok { st = Live { conn; now } }
       | Error e -> Error e
     end
 
@@ -204,6 +234,7 @@ module Impl = struct
                 t.st <- Broken e;
                 Error e
             | Ok conn ->
+                maybe_enable_qlog conn `Server;
                 t.st <- Live { conn; now };
                 Conn.recv conn ~now buf ~off ~len ~from;
                 Ok len)

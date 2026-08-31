@@ -75,3 +75,9 @@ val on_pto : t -> unit
 
 val discard_space : t -> space -> unit
 (** key discard: drop the space's packets from the in-flight count. *)
+
+(** Metric accessors for tracing. *)
+val srtt_ns : t -> int64
+
+val cwnd : t -> int
+val bytes_in_flight : t -> int

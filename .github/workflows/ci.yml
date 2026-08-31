@@ -147,6 +147,9 @@ jobs:
           opam exec -- dune exec test/interop_self/test_wt_self.exe
           opam exec -- dune exec test/lwt/test_lwt_self.exe
 
+      - name: Throughput floor (64 MiB in-memory transfer)
+        run: opam exec -- dune exec test/bench/bench_pair.exe
+
       # GitHub-hosted Linux runners ship Google Chrome.
       - name: Chrome interop (quiche backend)
         env:

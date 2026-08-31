@@ -162,10 +162,81 @@ type t = {
      keys install (RFC 9001 s.5.7). *)
   mutable early_app_stash : (string * addr) list;
   mutable replaying : bool;
+  (* qlog sink: receives one JSON event text per call (no framing) *)
+  mutable trace : (string -> unit) option;
 }
 
 let emit t e = Queue.add e t.events
 let next_event t = Queue.take_opt t.events
+
+(* ---- qlog (draft-qlog JSON-SEQ event bodies; framing is the sink's job) *)
+
+let set_trace t f = t.trace <- Some f
+
+let frame_qname (f : Frame.t) =
+  match f with
+  | Frame.Padding _ -> "padding"
+  | Frame.Ping -> "ping"
+  | Frame.Ack _ -> "ack"
+  | Frame.Reset_stream _ -> "reset_stream"
+  | Frame.Reset_stream_at _ -> "reset_stream_at"
+  | Frame.Stop_sending _ -> "stop_sending"
+  | Frame.Crypto _ -> "crypto"
+  | Frame.New_token _ -> "new_token"
+  | Frame.Stream _ -> "stream"
+  | Frame.Max_data _ -> "max_data"
+  | Frame.Max_stream_data _ -> "max_stream_data"
+  | Frame.Max_streams_bidi _ | Frame.Max_streams_uni _ -> "max_streams"
+  | Frame.Data_blocked _ -> "data_blocked"
+  | Frame.Stream_data_blocked _ -> "stream_data_blocked"
+  | Frame.Streams_blocked_bidi _ | Frame.Streams_blocked_uni _ ->
+      "streams_blocked"
+  | Frame.New_connection_id _ -> "new_connection_id"
+  | Frame.Retire_connection_id _ -> "retire_connection_id"
+  | Frame.Path_challenge _ -> "path_challenge"
+  | Frame.Path_response _ -> "path_response"
+  | Frame.Connection_close _ -> "connection_close"
+  | Frame.Handshake_done -> "handshake_done"
+  | Frame.Datagram _ -> "datagram"
+
+let space_qname ix =
+  match ix with 0 -> "initial" | 1 -> "handshake" | _ -> "1RTT"
+
+let qlog t ~now name data =
+  match t.trace with
+  | None -> ()
+  | Some sink ->
+      sink
+        (Printf.sprintf {|{"time":%.3f,"name":"%s","data":%s}|}
+           (Int64.to_float now /. 1e6)
+           name data)
+
+let qlog_packet t ~now ~dir ~ix ~pn ~size frames =
+  if t.trace <> None then
+    qlog t ~now
+      (if dir = `Tx then "transport:packet_sent" else "transport:packet_received")
+      (Printf.sprintf
+         {|{"header":{"packet_type":"%s","packet_number":%d},"raw":{"length":%d},"frames":[%s]}|}
+         (space_qname ix) pn size
+         (String.concat ","
+            (List.map
+               (fun f -> Printf.sprintf {|{"frame_type":"%s"}|} (frame_qname f))
+               frames)))
+
+let qlog_dropped t ~now ~ix ~reason =
+  if t.trace <> None then
+    qlog t ~now "transport:packet_dropped"
+      (Printf.sprintf {|{"header":{"packet_type":"%s"},"trigger":"%s"}|}
+         (space_qname ix) reason)
+
+let qlog_metrics t ~now =
+  if t.trace <> None then
+    qlog t ~now "recovery:metrics_updated"
+      (Printf.sprintf
+         {|{"smoothed_rtt":%.3f,"congestion_window":%d,"bytes_in_flight":%d}|}
+         (Int64.to_float (Recovery.srtt_ns t.recovery) /. 1e6)
+         (Recovery.cwnd t.recovery)
+         (Recovery.bytes_in_flight t.recovery))
 
 let sp_initial t = t.spaces.(0)
 let sp_handshake t = t.spaces.(1)
@@ -374,6 +445,7 @@ let create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params ~now =
           prev_rx_keys = None;
           early_app_stash = [];
           replaying = false;
+          trace = None;
         }
       in
       Ok t
@@ -566,6 +638,7 @@ let handle_frame t sp ~now (f : Frame.t) =
         in
         on_acked_descriptors t acked;
         requeue_lost t lost;
+        if acked <> [] then qlog_metrics t ~now;
         (* cwnd/credit may have opened: wake blocked streams *)
         if acked <> [] then
           Hashtbl.iter
@@ -841,7 +914,11 @@ let rec recv t ~now buf ~off ~len ~from =
                     from )
                   :: t.early_app_stash;
               match try_open t sp buf located with
-              | None -> ()
+              | None ->
+                  qlog_dropped t ~now ~ix:sp.ix
+                    ~reason:
+                      (if sp.rx_keys = None then "key_unavailable"
+                       else "decrypt_error")
               | Some ((pn, plaintext), key_gen) ->
                   (* adopt the peer's source CID for our outgoing headers:
                      the server learns the client's SCID from its Initial;
@@ -895,6 +972,9 @@ let rec recv t ~now buf ~off ~len ~from =
                           ~reason:("frame encoding: " ^ e)
                     | Ok frames -> (
                         try
+                          qlog_packet t ~now ~dir:`Rx ~ix:sp.ix ~pn
+                            ~size:(located.Packet.last - located.Packet.off)
+                            frames;
                           let ack_eliciting =
                             List.exists Frame.is_ack_eliciting frames
                           in
@@ -1232,6 +1312,8 @@ let build_packet t sp ~now ~budget =
             | _ -> short_header_bytes t ~pn ~pn_len
           in
           let pkt = Packet.seal ~keys ~pn:(Int64.of_int pn) ~pn_len ~header payload in
+          qlog_packet t ~now ~dir:`Tx ~ix:sp.ix ~pn ~size:(String.length pkt)
+            frames;
           Recovery.on_sent t.recovery sp.rec_space
             {
               Recovery.pn;

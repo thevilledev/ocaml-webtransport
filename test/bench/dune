@@ -1,0 +1,4 @@
+(executable
+ (name bench_pair)
+ (libraries webtransport_purequic webtransport wt_certs quiche
+   mirage-crypto-rng bigstringaf unix))

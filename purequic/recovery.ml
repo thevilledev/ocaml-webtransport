@@ -245,3 +245,7 @@ let discard_space t sp =
   sp.sent <- [];
   sp.loss_time <- None;
   sp.last_ae_sent <- None
+
+let srtt_ns t = t.srtt
+let cwnd t = t.cwnd
+let bytes_in_flight t = t.bytes_in_flight
