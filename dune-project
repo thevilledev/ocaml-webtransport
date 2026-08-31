@@ -30,6 +30,7 @@
   dune
   bigstringaf
   x509
+  mirage-crypto
   mirage-crypto-ec
   mirage-crypto-rng
   ptime

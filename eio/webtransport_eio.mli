@@ -139,9 +139,14 @@ module Wt : sig
     port:int ->
     ?accept:(Webtransport.Engine.request -> [ `Accept | `Reject of int ]) ->
     ?fc:int * int * int ->
+    ?retry:bool ->
     handler:(session -> unit) ->
     unit ->
     unit
+  (** [retry] (default false) enables stateless address validation: the
+      first Initial from an unvalidated address is answered with a Retry
+      carrying an AEAD-sealed token (30 s lifetime, bound to the client
+      address); only token-bearing Initials create connections. *)
 
   (** Establishes a WebTransport session; returns once the server accepted.
       @raise Session_rejected on a non-2xx response.

@@ -164,6 +164,11 @@ type t = {
   mutable replaying : bool;
   (* qlog sink: receives one JSON event text per call (no framing) *)
   mutable trace : (string -> unit) option;
+  (* client-side Retry (RFC 9000 s.8.1): the token to attach to Initials
+     and the Retry's source CID, which the server's transport parameters
+     must repeat as retry_source_connection_id *)
+  mutable retry_token : string;
+  mutable retry_source : string option;
 }
 
 let emit t e = Queue.add e t.events
@@ -251,10 +256,11 @@ let is_closed t =
 
 (* ---- transport parameters ---- *)
 
-let our_params ~(cfg : config) ~scid ~odcid =
+let our_params ?retry_scid ~(cfg : config) ~scid ~odcid () =
   {
     Tparams.default with
     original_dcid = (if cfg.role = `Server then Some odcid else None);
+    retry_scid;
     initial_scid = Some scid;
     max_idle_timeout_ms = Int64.to_int (Int64.div cfg.max_idle_ns 1_000_000L);
     max_udp_payload_size = 65527;
@@ -321,6 +327,7 @@ let apply_peer_params t ~now params =
         (* dcid holds the server's chosen SCID by the time EE arrives *)
         params.Tparams.initial_scid = Some t.dcid
         && params.Tparams.original_dcid = Some t.original_dcid
+        && params.Tparams.retry_scid = t.retry_source
   in
   if not auth_ok then
     protocol_close t ~now ~code:0x08 ~reason:"transport parameter cid mismatch"
@@ -365,9 +372,10 @@ let rec drain_tls t ~now =
 
 (* ---- construction ---- *)
 
-let create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params ~now =
+let create ?retry_scid ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params
+    ~now () =
   let tparams =
-    Tparams.encode (our_params ~cfg ~scid ~odcid:odcid_for_params)
+    Tparams.encode (our_params ?retry_scid ~cfg ~scid ~odcid:odcid_for_params ())
   in
   let tls_cfg =
     match cfg.role with
@@ -446,6 +454,8 @@ let create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params ~now =
           early_app_stash = [];
           replaying = false;
           trace = None;
+          retry_token = "";
+          retry_source = None;
         }
       in
       Ok t
@@ -454,7 +464,7 @@ let client cfg ~server_name ~scid ~dcid ~peer ~now =
   if cfg.role <> `Client then Error "config role is not `Client"
   else
     match
-      create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params:"" ~now
+      create ~cfg ~peer ~scid ~dcid ~server_name ~odcid_for_params:"" ~now ()
     with
     | Error e -> Error e
     | Ok t ->
@@ -465,18 +475,29 @@ let client cfg ~server_name ~scid ~dcid ~peer ~now =
         drain_tls t ~now;
         Ok t
 
-let server_with_odcid cfg ~scid ~odcid ~peer ~now =
+(* [retried_from], when given, is the client's original DCID recovered
+   from a validated Retry token; [odcid] is then the CID of the retried
+   Initial (the Retry's new_scid), which keys derive from and which the
+   retry_source_connection_id parameter must repeat. The address counts
+   as validated. *)
+let server_with_odcid ?retried_from cfg ~scid ~odcid ~peer ~now =
   if cfg.role <> `Server then Error "config role is not `Server"
   else
+    let odcid_for_params, retry_scid =
+      match retried_from with
+      | Some original -> (original, Some scid)
+      | None -> (odcid, None)
+    in
     match
-      create ~cfg ~peer ~scid ~dcid:"" ~server_name:None
-        ~odcid_for_params:odcid ~now
+      create ?retry_scid ~cfg ~peer ~scid ~dcid:"" ~server_name:None
+        ~odcid_for_params ~now ()
     with
     | Error e -> Error e
     | Ok t ->
         let itx, irx = Aead.initial_keys ~dcid:odcid ~role:`Server in
         (sp_initial t).tx_keys <- Some itx;
         (sp_initial t).rx_keys <- Some irx;
+        if retried_from <> None then t.addr_validated <- true;
         Ok t
 
 (* ---- streams: id/table helpers ---- *)
@@ -890,6 +911,33 @@ let try_open t sp buf located =
               | None -> None))
       | None -> None)
 
+(* Client-side Retry (RFC 9000 s.8.1, RFC 9001 s.5.8): accept at most one
+   authentic Retry before any packet has been processed, re-derive the
+   Initial keys from the server's new CID and re-send the first flight
+   with the token attached. *)
+let handle_retry t ~now buf located ~scid ~token =
+  ignore now;
+  let sp = sp_initial t in
+  if
+    t.cfg.role = `Client
+    && t.retry_source = None
+    && (not t.established)
+    && sp.largest_rx < 0
+    && String.length scid > 0
+    && Packet.retry_valid ~odcid:t.original_dcid buf located
+  then begin
+    t.retry_source <- Some scid;
+    t.retry_token <- token;
+    t.dcid <- scid;
+    t.dcid_locked <- false;
+    let itx, irx = Aead.initial_keys ~dcid:scid ~role:`Client in
+    sp.tx_keys <- Some itx;
+    sp.rx_keys <- Some irx;
+    (* in-flight Initials will never be acked under the old keys *)
+    Recovery.discard_space t.recovery sp.rec_space;
+    Crypto_stream.retransmit_all sp.crypto
+  end
+
 let rec recv t ~now buf ~off ~len ~from =
   match t.state with
   | Dead | Draining _ -> ()
@@ -900,6 +948,10 @@ let rec recv t ~now buf ~off ~len ~from =
       t.bytes_received <- t.bytes_received + len;
       Packet.iter buf ~off ~len ~short_dcid_len:(String.length t.scid)
         (fun located ->
+          match located.Packet.hdr with
+          | Packet.Long { kind = Packet.Retry; scid; token; _ } ->
+              handle_retry t ~now buf located ~scid ~token
+          | _ -> (
           match space_for_packet t located with
           | None -> ()
           | Some sp -> (
@@ -990,7 +1042,7 @@ let rec recv t ~now buf ~off ~len ~from =
                           end
                         with Proto_violation (code, reason) ->
                           protocol_close t ~now ~code ~reason)
-                  end));
+                  end)));
       (* replay stashed 1-RTT datagrams once the keys are in *)
       if
         (not t.replaying)
@@ -1233,7 +1285,10 @@ let long_header_bytes t ~kind ~pn ~pn_len ~payload_len =
   Buffer.add_string b t.dcid;
   Buffer.add_uint8 b (String.length t.scid);
   Buffer.add_string b t.scid;
-  if kind = `I then Buffer.add_uint8 b 0;
+  if kind = `I then begin
+    Varint.add_buffer b (String.length t.retry_token);
+    Buffer.add_string b t.retry_token
+  end;
   let length = pn_len + payload_len + 16 in
   Buffer.add_uint8 b (0x40 lor ((length lsr 8) land 0x3f));
   Buffer.add_uint8 b (length land 0xff);

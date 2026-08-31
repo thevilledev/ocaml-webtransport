@@ -75,6 +75,7 @@ val client :
     first flight is queued immediately; call [send] to emit it. *)
 
 val server_with_odcid :
+  ?retried_from:string ->
   config ->
   scid:string ->
   odcid:string ->

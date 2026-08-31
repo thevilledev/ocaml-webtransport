@@ -231,7 +231,7 @@ end
    [on_new_conn] runs for each accepted connection and returns the conn's
    Core_conn state so packets can be fed to it. *)
 
-let server_recv_loop (type c k) ~sw ~sock
+let server_recv_loop (type c k) ~sw ~sock ?retry_state
     (module B : Qb.S with type t = c and type config = k) (cfg : k) ~local
     ~now_ns ~(on_new_conn : c -> string -> Core_conn.t option) =
   let table : (string, Core_conn.t) Hashtbl.t = Hashtbl.create 16 in
@@ -240,8 +240,27 @@ let server_recv_loop (type c k) ~sw ~sock
       let rcs = Cstruct.of_bigarray rbuf in
       let vn_buf = Bigstringaf.create 256 in
       let sock_send = make_sock_send sock in
+      let n_ref = ref 0 in
+      let accept_conn hdr ?odcid ~scid ~from () =
+        match B.accept ?odcid cfg ~scid ~peer:from ~local ~now:(now_ns ()) with
+        | Error _ -> ()
+        | Ok h -> (
+            match on_new_conn h scid with
+            | None -> ()
+            | Some st ->
+                let dcid = hdr.B.dcid in
+                Hashtbl.add table dcid st;
+                if not (String.equal dcid scid) then Hashtbl.add table scid st;
+                Fiber.fork_daemon ~sw (fun () ->
+                    ignore (Promise.await st.Core_conn.closed_p);
+                    Hashtbl.remove table dcid;
+                    Hashtbl.remove table scid;
+                    `Stop_daemon);
+                Core_conn.feed st rbuf ~len:n_ref.contents ~from)
+      in
       let rec loop () =
         let addr, n = Eio.Net.recv sock rcs in
+        n_ref := n;
         let from = sockaddr_to_raw addr in
         (match B.parse_header rbuf ~off:0 ~len:n with
         | Error _ -> ()
@@ -262,27 +281,35 @@ let server_recv_loop (type c k) ~sw ~sock
                      packets carry it as DCID and [parse_header] reads DCIDs
                      as 16 bytes. Map both the client's initial DCID (for the
                      rest of its first flights) and our SCID to the conn. *)
-                  let scid = random_scid () in
-                  match
-                    B.accept cfg ~scid ~peer:from ~local ~now:(now_ns ())
-                  with
-                  | Error _ -> ()
-                  | Ok h -> (
-                      match on_new_conn h scid with
-                      | None -> ()
-                      | Some st ->
-                          let dcid = hdr.B.dcid in
-                          Hashtbl.add table dcid st;
-                          Hashtbl.add table scid st;
-                          Fiber.fork_daemon ~sw (fun () ->
-                              ignore (Promise.await st.Core_conn.closed_p);
-                              Hashtbl.remove table dcid;
-                              Hashtbl.remove table scid;
-                              `Stop_daemon);
-                          Core_conn.feed st rbuf ~len:n ~from))));
+                  match retry_state with
+                  | Some rs when String.equal hdr.B.token "" ->
+                      (* unvalidated address: answer statelessly with Retry *)
+                      let new_scid = random_scid () in
+                      let token =
+                        Webtransport.Retry.mint rs ~odcid:hdr.B.dcid ~peer:from
+                          ~now:(now_ns ())
+                      in
+                      (match
+                         Webtransport.Retry.write ~client_scid:hdr.B.scid
+                           ~new_scid ~odcid:hdr.B.dcid ~token vn_buf
+                       with
+                      | Ok len ->
+                          sock_send ~dst:from
+                            (Cstruct.of_bigarray ~off:0 ~len vn_buf)
+                      | Error _ -> ())
+                  | Some rs -> (
+                      match
+                        Webtransport.Retry.validate rs ~token:hdr.B.token
+                          ~peer:from ~now:(now_ns ())
+                      with
+                      | None -> () (* forged or expired token: drop *)
+                      | Some odcid ->
+                          (* our SCID is the CID we minted into the Retry;
+                             the retried Initial addresses it as DCID *)
+                          accept_conn hdr ~odcid ~scid:hdr.B.dcid ~from ())
+                  | None -> accept_conn hdr ~scid:(random_scid ()) ~from ())));
         loop ()
       in
-      ignore (fun key -> Hashtbl.remove table key);
       loop ())
   |> fun () ->
   table
@@ -847,7 +874,7 @@ module Wt = struct
   (* ---- endpoints ---- *)
 
   let listen ~sw ~net ~clock ~backend:(Backend ((module B), cfg)) ~port
-      ?(accept = fun _ -> `Accept) ?fc ~handler () =
+      ?(accept = fun _ -> `Accept) ?fc ?(retry = false) ~handler () =
     let sock =
       Eio.Net.datagram_socket ~sw ~reuse_addr:true net
         (`Udp (Eio.Net.Ipaddr.V4.any, port))
@@ -855,8 +882,15 @@ module Wt = struct
     let local = ("\000\000\000\000", port) in
     let now_ns, sleep_until_ns = make_clock_fns clock in
     let sock_send = make_sock_send sock in
+    let retry_state =
+      if retry then begin
+        Mirage_crypto_rng_unix.use_default ();
+        Some (Webtransport.Retry.create ())
+      end
+      else None
+    in
     ignore
-      (server_recv_loop ~sw ~sock (module B) cfg ~local ~now_ns
+      (server_recv_loop ~sw ~sock ?retry_state (module B) cfg ~local ~now_ns
          ~on_new_conn:(fun h _key ->
            let st = Core_conn.mk ~sock_send ~now_ns ~sleep_until_ns in
            Core_conn.install_backend (module B) h st ~local;

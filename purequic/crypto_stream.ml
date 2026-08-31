@@ -88,3 +88,7 @@ let take t ~max =
 let requeue t ~lo ~hi =
   if hi >= lo && lo < Buffer.length t.tx_buf then
     Ranges.insert t.tx_pending ~lo ~hi:(min hi (Buffer.length t.tx_buf - 1))
+
+let retransmit_all t =
+  if Buffer.length t.tx_buf > 0 then
+    Ranges.insert t.tx_pending ~lo:0 ~hi:(Buffer.length t.tx_buf - 1)

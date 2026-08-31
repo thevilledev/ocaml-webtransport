@@ -116,6 +116,7 @@ module Impl = struct
     scid : string;
     is_long : bool;
     is_initial : bool;
+    token : string;
   }
 
   let parse_header buf ~off ~len =
@@ -134,6 +135,7 @@ module Impl = struct
               scid = h.Q.scid;
               is_long;
               is_initial = is_long && h.Q.ty = Q.initial_type;
+              token = h.Q.token;
             }
 
   let negotiate_version ~scid ~dcid buf =
@@ -183,10 +185,10 @@ module Impl = struct
       | q -> Ok (mk `Client q)
       | exception Failure m -> Error m
 
-  let accept (cfg : config) ~scid ~peer ~local ~now:_ =
+  let accept ?odcid (cfg : config) ~scid ~peer ~local ~now:_ =
     if cfg.role <> `Server then Error "config role is not `Server"
     else
-      match Q.accept ~scid ~local ~peer cfg.qc with
+      match Q.accept ?odcid ~scid ~local ~peer cfg.qc with
       | q -> Ok (mk `Server q)
       | exception Failure m -> Error m
 

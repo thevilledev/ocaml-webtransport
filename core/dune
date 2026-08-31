@@ -1,4 +1,4 @@
 (library
  (name webtransport)
  (public_name webtransport)
- (libraries bigstringaf wt_qpack))
+ (libraries bigstringaf wt_qpack mirage-crypto mirage-crypto-rng))

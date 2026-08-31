@@ -414,13 +414,21 @@ module Wt = struct
     ctx
 
   let listen (type c k) ~backend:(Backend ((module B), cfg)) ~port
-      ?(accept = fun _ -> `Accept) ?fc ~handler () =
+      ?(accept = fun _ -> `Accept) ?fc ?(retry = false) ~handler () =
     ignore (fun (x : c) -> x);
     ignore (fun (x : k) -> x);
     let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_DGRAM 0 in
     Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
     Lwt_unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_any, port))
     >>= fun () ->
+    let retry_state =
+      if retry then begin
+        Mirage_crypto_rng_unix.use_default ();
+        Some (Webtransport.Retry.create ())
+      end
+      else None
+    in
+    let retry_buf = Bigstringaf.create 256 in
     let local = ("\000\000\000\000", port) in
     let table : (string, conn_ctx) Hashtbl.t = Hashtbl.create 16 in
     let rbuf = Bigstringaf.create 65_536 in
@@ -444,8 +452,8 @@ module Wt = struct
                     >|= fun _ -> ()
                 | Error _ -> Lwt.return_unit)
               else if hdr.B.is_initial then (
-                let scid = random_scid () in
-                match B.accept cfg ~scid ~peer:from ~local ~now:(now_ns ()) with
+                let accept_conn ?odcid ~scid () =
+                match B.accept ?odcid cfg ~scid ~peer:from ~local ~now:(now_ns ()) with
                 | Error _ -> Lwt.return_unit
                 | Ok h ->
                     let ctx =
@@ -454,7 +462,8 @@ module Wt = struct
                     in
                     let dcid = hdr.B.dcid in
                     Hashtbl.add table dcid ctx;
-                    Hashtbl.add table scid ctx;
+                    if not (String.equal dcid scid) then
+                      Hashtbl.add table scid ctx;
                     Lwt.async (fun () ->
                         ctx.st.Core.closed_p >|= fun _ ->
                         Hashtbl.remove table dcid;
@@ -477,7 +486,35 @@ module Wt = struct
                               accept_loop ()
                         in
                         accept_loop ());
-                    feed ctx rbuf ~len:n ~from)
+                    feed ctx rbuf ~len:n ~from
+                in
+                match retry_state with
+                | Some rs when String.equal hdr.B.token "" ->
+                    (* unvalidated address: answer statelessly with Retry *)
+                    let new_scid = random_scid () in
+                    let token =
+                      Webtransport.Retry.mint rs ~odcid:hdr.B.dcid ~peer:from
+                        ~now:(now_ns ())
+                    in
+                    (match
+                       Webtransport.Retry.write ~client_scid:hdr.B.scid
+                         ~new_scid ~odcid:hdr.B.dcid ~token retry_buf
+                     with
+                    | Ok len ->
+                        Lwt_unix.sendto sock
+                          (Bytes.unsafe_of_string
+                             (Bigstringaf.substring retry_buf ~off:0 ~len))
+                          0 len [] sockaddr
+                        >|= fun _ -> ()
+                    | Error _ -> Lwt.return_unit)
+                | Some rs -> (
+                    match
+                      Webtransport.Retry.validate rs ~token:hdr.B.token
+                        ~peer:from ~now:(now_ns ())
+                    with
+                    | None -> Lwt.return_unit (* forged or expired: drop *)
+                    | Some odcid -> accept_conn ~odcid ~scid:hdr.B.dcid ())
+                | None -> accept_conn ~scid:(random_scid ()) ())
               else Lwt.return_unit))
       >>= loop
     in

@@ -1,4 +1,5 @@
 (library
  (name webtransport_eio)
  (public_name webtransport-eio)
- (libraries webtransport eio cstruct bigstringaf mtime))
+ (libraries webtransport eio cstruct bigstringaf mtime mirage-crypto-rng
+   mirage-crypto-rng.unix))

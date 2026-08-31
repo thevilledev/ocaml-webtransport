@@ -56,6 +56,7 @@ module type S = sig
     scid : string;
     is_long : bool;
     is_initial : bool;
+    token : string;  (* Initial packets only; "" otherwise *)
   }
 
   val parse_header :
@@ -74,7 +75,12 @@ module type S = sig
     now:int64 ->
     (t, string) result
 
+  (* [odcid], when given, is the client's original destination connection
+     id recovered from a validated Retry token: the connection advertises
+     it as original_destination_connection_id, [scid] as
+     retry_source_connection_id, and treats the address as validated. *)
   val accept :
+    ?odcid:string ->
     config ->
     scid:string ->
     peer:addr ->

@@ -58,6 +58,7 @@ module Wt : sig
     port:int ->
     ?accept:(Webtransport.Engine.request -> [ `Accept | `Reject of int ]) ->
     ?fc:int * int * int ->
+    ?retry:bool ->
     handler:(session -> unit Lwt.t) ->
     unit ->
     unit Lwt.t

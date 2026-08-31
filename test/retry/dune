@@ -1,0 +1,5 @@
+(tests
+ (names test_retry test_retry_unit)
+ (package webtransport-purequic)
+ (libraries webtransport webtransport_eio webtransport_purequic wt_certs
+   mirage-crypto-rng mirage-crypto-rng.unix eio eio_main bigstringaf alcotest))

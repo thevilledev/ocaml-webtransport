@@ -25,3 +25,7 @@ val take : t -> max:int -> (int * string) option
 
 val requeue : t -> lo:int -> hi:int -> unit
 (** loss: mark an absolute byte range for retransmission. *)
+
+val retransmit_all : t -> unit
+(** mark every byte ever sent as pending again (client Retry: the first
+    flight is re-sent under fresh Initial keys). *)

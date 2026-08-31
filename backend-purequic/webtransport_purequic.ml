@@ -27,7 +27,12 @@ module Impl = struct
   type live = { conn : Conn.t; mutable now : int64 }
 
   type state =
-    | Waiting of { cfg : Conn.config; scid : string; peer : string * int }
+    | Waiting of {
+        cfg : Conn.config;
+        scid : string;
+        peer : string * int;
+        odcid : string option;  (* from a validated Retry token *)
+      }
     | Live of live
     | Broken of string
 
@@ -127,6 +132,7 @@ module Impl = struct
     scid : string;
     is_long : bool;
     is_initial : bool;
+    token : string;
   }
 
   let parse_header buf ~off ~len =
@@ -134,7 +140,7 @@ module Impl = struct
     | Error e -> Error e
     | Ok { hdr; _ } -> (
         match hdr with
-        | Purequic.Packet.Long { kind; version; dcid; scid; _ } ->
+        | Purequic.Packet.Long { kind; version; dcid; scid; token } ->
             Ok
               {
                 version;
@@ -142,12 +148,28 @@ module Impl = struct
                 scid;
                 is_long = true;
                 is_initial = kind = Purequic.Packet.Initial;
+                token;
               }
         | Purequic.Packet.Short { dcid } ->
             Ok
-              { version = 1l; dcid; scid = ""; is_long = false; is_initial = false }
+              {
+                version = 1l;
+                dcid;
+                scid = "";
+                is_long = false;
+                is_initial = false;
+                token = "";
+              }
         | Purequic.Packet.Vneg { dcid; scid; _ } ->
-            Ok { version = 0l; dcid; scid; is_long = true; is_initial = false })
+            Ok
+              {
+                version = 0l;
+                dcid;
+                scid;
+                is_long = true;
+                is_initial = false;
+                token = "";
+              })
 
   let negotiate_version ~scid ~dcid buf =
     Purequic.Packet.write_vneg buf ~client_dcid:dcid ~client_scid:scid
@@ -192,9 +214,9 @@ module Impl = struct
       | Error e -> Error e
     end
 
-  let accept cfg ~scid ~peer ~local:_ ~now:_ =
+  let accept ?odcid cfg ~scid ~peer ~local:_ ~now:_ =
     if cfg.Conn.role <> `Server then Error "accept with a client config"
-    else Ok { st = Waiting { cfg; scid; peer } }
+    else Ok { st = Waiting { cfg; scid; peer; odcid } }
 
   let live_opt t = match t.st with Live l -> Some l | _ -> None
 
@@ -223,13 +245,16 @@ module Impl = struct
         dbg "recv %d bytes" len;
         Conn.recv l.conn ~now buf ~off ~len ~from;
         Ok len
-    | Waiting { cfg; scid; peer } -> (
+    | Waiting { cfg; scid; peer; odcid = retried_from } -> (
         (* materialize the server connection from the first Initial *)
         match Purequic.Packet.parse buf ~off ~len ~short_dcid_len:16 with
         | Error e -> Error e
         | Ok { hdr = Purequic.Packet.Long { kind = Initial; version = 1l; dcid; _ }; _ }
           -> (
-            match Conn.server_with_odcid cfg ~scid ~odcid:dcid ~peer ~now with
+            match
+              Conn.server_with_odcid ?retried_from cfg ~scid ~odcid:dcid ~peer
+                ~now
+            with
             | Error e ->
                 t.st <- Broken e;
                 Error e

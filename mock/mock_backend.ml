@@ -62,6 +62,7 @@ module Impl = struct
     scid : string;
     is_long : bool;
     is_initial : bool;
+    token : string;
   }
 
   let parse_header _ ~off:_ ~len:_ = Error "mock backend has no packets"
@@ -86,7 +87,7 @@ module Impl = struct
   let connect role ~server_name:_ ~scid:_ ~peer:_ ~local:_ ~now:_ =
     Ok (make role)
 
-  let accept role ~scid:_ ~peer:_ ~local:_ ~now:_ = Ok (make role)
+  let accept ?odcid:_ role ~scid:_ ~peer:_ ~local:_ ~now:_ = Ok (make role)
 
   let close t ~app ~code ~reason =
     if not t.closed then begin
