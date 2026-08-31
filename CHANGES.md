@@ -34,6 +34,23 @@ OCaml.
   crowbar fuzz targets over every decoder, TLS message handling and
   established connections; deterministic loss/PTO/idle/key-update
   scenarios in `test/pure_pair`.
+- Stateless Retry / address validation (`?retry` on `Wt.listen`):
+  AEAD-sealed, address-bound, expiring tokens and the RFC 9001 Retry
+  integrity tag; the purequic client handles a server Retry and both
+  backends thread tokens through the seam.
 - Tooling: `wt-devcert` for browser-acceptable dev certificates; qlog
-  capture (`WT_QLOG_DIR`) on both backends; `WT_BACKEND=quiche|pure`
-  backend selection across tests and examples.
+  capture (`WT_QLOG_DIR`) on both backends (native, dependency-free on
+  purequic); `WT_BACKEND=quiche|pure` backend selection across tests
+  and examples.
+
+### Not yet supported
+
+- **0-RTT / session resumption.** WebTransport runs correctly over
+  1-RTT (every browser and webtransport-go does), so this latency
+  optimization — TLS session tickets, early data, and its replay
+  protection — is deferred to a later release rather than widening the
+  TLS attack surface for the first version.
+- QUIC connection migration (the initiating side), stateless-reset
+  emission, and ECN are likewise out of scope; the engine tolerates a
+  peer's use of the features it needs to (passive path/NAT rebinding,
+  NEW_CONNECTION_ID) without initiating them.

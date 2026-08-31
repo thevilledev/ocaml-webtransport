@@ -1,0 +1,6 @@
+; The quic-interop-runner endpoint. Built into a Docker image (see
+; Dockerfile); not part of the default build, and not installed.
+(executable
+ (name wt_interop)
+ (libraries webtransport webtransport_eio webtransport_purequic wt_certs eio
+   eio_main mirage-crypto-rng mirage-crypto-rng.unix str unix))
